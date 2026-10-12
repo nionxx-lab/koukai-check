@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node10",
+    "outDir": "build/sea/cjs",
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "exclude": ["src/cli/preview.ts", "src/cli/format.ts"]
+}

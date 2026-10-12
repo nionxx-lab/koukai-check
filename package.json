@@ -1,0 +1,53 @@
+{
+  "name": "koukai-check",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AIで作ったアプリを公開する前に、秘密情報や危険な公開設定を確認するツール（Windows アプリ）",
+  "keywords": [
+    "security",
+    "secrets",
+    "pre-release",
+    "supabase",
+    "firebase",
+    "windows",
+    "japanese",
+    "vibe-coding"
+  ],
+  "homepage": "https://github.com/nionxx-lab/koukai-check#readme",
+  "bugs": {
+    "url": "https://github.com/nionxx-lab/koukai-check/issues"
+  },
+  "license": "PolyForm-Shield-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nionxx-lab/koukai-check.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "koukai-check": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "!dist/cli/preview.js",
+    "!dist/cli/format.js",
+    "samples/security-advisors.sample.json"
+  ],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "npm run build && node dist/cli/index.js",
+    "preview": "npm run build && node dist/cli/preview.js",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --import ./dist-test/test/helpers/network-guard.js --test dist-test/test/client.test.js dist-test/test/diagnostics.test.js dist-test/test/report.test.js dist-test/test/cli.test.js dist-test/test/security.test.js dist-test/test/e2e.test.js dist-test/test/package.test.js dist-test/test/app.test.js dist-test/test/sea.test.js dist-test/test/window.test.js dist-test/test/token.test.js dist-test/test/scan.test.js dist-test/test/secret-names.test.js dist-test/test/exposure.test.js dist-test/test/interruptible.test.js dist-test/test/git-history.test.js dist-test/test/release-files.test.js",
+    "prepack": "npm run build",
+    "build:win": "node scripts/build-windows-exe.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "postject": "1.0.0-alpha.6",
+    "resedit": "3.0.2",
+    "typescript": "5.9.3"
+  }
+}

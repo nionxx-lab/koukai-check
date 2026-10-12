@@ -1,0 +1,11 @@
+# 改行を LF に固定する（Windows の作業コピーでも同じ。exe に入る app.manifest などの中身が OS で変わらないように）
+* text=auto eol=lf
+
+# バイナリ
+*.exe binary
+*.dll binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.zip binary
+*.nupkg binary

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dist-test/
+build/
+
+# Windows 版の生成物。GitHub Releases で配布し、Git にはコミットしない（.github/workflows/koukai-check-windows.yml）
+release/windows/*.exe
+release/windows/SHA256SUMS.txt
+release/windows/THIRD-PARTY-NOTICES.txt
+release/windows/BUILD-INFO.txt

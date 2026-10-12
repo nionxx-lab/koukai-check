@@ -1,0 +1,81 @@
+{
+  "lints": [
+    {
+      "name": "rls_disabled_in_public",
+      "title": "Sample: RLS is off for a public table",
+      "level": "ERROR",
+      "facing": "EXTERNAL",
+      "categories": ["SECURITY"],
+      "description": "Sample description: a table in a schema served by the API has row level security turned off.",
+      "detail": "Sample detail: `public.profiles` is reachable from the API and RLS is off.",
+      "remediation": "https://supabase.com/docs/guides/database/database-linter?lint=0013_rls_disabled_in_public",
+      "metadata": { "schema": "public", "name": "profiles", "type": "table" },
+      "cache_key": "rls_disabled_in_public_public_profiles",
+      "observed_at": "2026-10-07T09:00:00Z"
+    },
+    {
+      "name": "security_definer_view",
+      "title": "Sample: view runs with its owner rights",
+      "level": "ERROR",
+      "facing": "EXTERNAL",
+      "categories": ["SECURITY"],
+      "description": "Sample description: a view is set to SECURITY DEFINER, so permissions and RLS are checked as the view owner instead of the caller.",
+      "detail": "Sample detail: view `public.user_stats` uses SECURITY DEFINER.",
+      "remediation": "https://supabase.com/docs/guides/database/database-linter?lint=0010_security_definer_view",
+      "metadata": { "schema": "public", "name": "user_stats", "type": "view" },
+      "cache_key": "security_definer_view_public_user_stats",
+      "observed_at": "2026-10-07T09:00:00Z"
+    },
+    {
+      "name": "rls_enabled_no_policy",
+      "title": "Sample: RLS is on but there are no policies",
+      "level": "INFO",
+      "facing": "EXTERNAL",
+      "categories": ["SECURITY"],
+      "description": "Sample description: row level security is on for a table, but it has no policies yet.",
+      "detail": "Sample detail: `public.notes` has RLS on and no policies.",
+      "remediation": "https://supabase.com/docs/guides/database/database-linter?lint=0008_rls_enabled_no_policy",
+      "metadata": { "schema": "public", "name": "notes", "type": "table" },
+      "cache_key": "rls_enabled_no_policy_public_notes",
+      "observed_at": "2026-10-07T09:00:00Z"
+    },
+    {
+      "name": "function_search_path_mutable",
+      "title": "Sample: function search_path is not fixed",
+      "level": "WARN",
+      "facing": "EXTERNAL",
+      "categories": ["SECURITY"],
+      "description": "Sample description: a function does not pin its search_path setting.",
+      "detail": "Sample detail: `public.handle_new_user` has no fixed search_path.",
+      "remediation": "https://supabase.com/docs/guides/database/database-linter?lint=0011_function_search_path_mutable",
+      "metadata": { "schema": "public", "name": "handle_new_user", "type": "function" },
+      "cache_key": "function_search_path_mutable_public_handle_new_user_abc123",
+      "observed_at": "2026-10-07T09:00:00Z"
+    },
+    {
+      "name": "auth_leaked_password_protection",
+      "title": "Sample: leaked password check is off",
+      "level": "WARN",
+      "facing": "EXTERNAL",
+      "categories": ["SECURITY"],
+      "description": "Sample description: the leaked password check in Auth is turned off.",
+      "detail": "Sample detail: turn on the leaked password check in the Auth settings.",
+      "remediation": "https://supabase.com/docs/guides/auth/password-security#password-strength-and-leaked-password-protection",
+      "metadata": { "type": "auth", "entity": "Auth" },
+      "cache_key": "auth_leaked_password_protection",
+      "observed_at": "2026-10-07T09:00:00Z"
+    },
+    {
+      "name": "some_future_lint",
+      "title": "Sample: a check this tool does not know yet",
+      "level": "WARN",
+      "facing": "EXTERNAL",
+      "categories": ["SECURITY"],
+      "description": "A lint that this tool does not know yet.",
+      "detail": "Table `public.orders` triggered a new check.",
+      "remediation": "https://supabase.com/docs/guides/database/database-linter",
+      "metadata": { "schema": "public", "name": "orders", "type": "table" },
+      "cache_key": "some_future_lint_public_orders"
+    }
+  ]
+}

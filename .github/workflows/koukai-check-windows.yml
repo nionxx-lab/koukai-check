@@ -1,0 +1,219 @@
+# 公開前チェック（koukai-check）Windows 版：テスト → exe のビルド → SHA256 → build provenance → GitHub Release（下書き）
+#
+# きっかけごとの動き
+#   pull_request / workflow_dispatch  … テスト・ビルドまで。exe は Actions の artifact（確認用・14日で消える）
+#   タグ koukai-check-v<バージョン>    … 本番用。Release を「下書き」で作る。公開は Owner が確認してから手で行う
+#   タグ koukai-check-ci-test-<任意>   … 配布の流れの確認用。「CI TEST・公開しない」と書いた下書き（プレリリース）を作る
+#
+# exe は Git にコミットしない（.gitignore）。配布は GitHub Release の添付ファイルで行う。
+#
+# このファイルは2か所にある（中身は APP_DIR と、PR のパスの条件だけが違う。test/release-files.test.ts で確かめる）
+#   公開リポジトリ：.github/workflows/koukai-check-windows.yml（APP_DIR: .）
+#   非公開の開発リポジトリ：koukai-check/ の親の .github/workflows/koukai-check-windows.yml（APP_DIR: koukai-check）
+
+name: koukai-check Windows
+
+on:
+  pull_request:
+  push:
+    tags:
+      - 'koukai-check-v*'
+      - 'koukai-check-ci-test-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: koukai-check-windows-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # アプリのフォルダ（公開リポジトリでは「.」）
+  APP_DIR: '.'
+  # 手元で確認した組み合わせに固定する（exe には、このバージョンの公式 node.exe を使う）
+  NODE_VERSION: '24.18.0'
+  # MinGW-w64（WinLibs）。windows-latest には入っていないため、固定した版を取得して SHA256 を照合する
+  WINLIBS_URL: 'https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r1/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.zip'
+  WINLIBS_SHA256: 'c1f52294597c0b73786b2a78eb5d176d89226d2f21875eab75e783a8b1cefcc4'
+
+jobs:
+  test:
+    name: 型の確認・全テスト（Windows）
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ${{ env.APP_DIR }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.APP_DIR }}/package-lock.json
+      - run: npm ci
+      - name: 型の確認
+        run: npm run typecheck
+      - name: 全テスト
+        run: npm test
+
+  build:
+    name: exe のビルド・SHA256・provenance
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # build provenance（attestation）の署名に使う
+      attestations: write
+    defaults:
+      run:
+        working-directory: ${{ env.APP_DIR }}
+    outputs:
+      exe-name: ${{ steps.files.outputs.exe-name }}
+      exe-sha256: ${{ steps.files.outputs.exe-sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.APP_DIR }}/package-lock.json
+      - run: npm ci
+
+      - name: MinGW-w64（WinLibs）を取得・照合
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'winlibs.zip'
+          Invoke-WebRequest -Uri $env:WINLIBS_URL -OutFile $zip
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:WINLIBS_SHA256) { throw "WinLibs の SHA256 が一致しません（期待: $env:WINLIBS_SHA256 / 実際: $actual）" }
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'winlibs')
+          $bin = Join-Path $env:RUNNER_TEMP 'winlibs\mingw64\bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          & (Join-Path $bin 'g++.exe') --version | Select-Object -First 1
+
+      - name: exe をビルド
+        run: npm run build:win
+
+      - name: 生成物の構造を確かめる（ウィンドウのアプリ・PE の構造・マニフェスト）
+        run: |
+          npx tsc -p tsconfig.test.json
+          node --import ./dist-test/test/helpers/network-guard.js --test --test-name-pattern="生成した exe|PE の検査|マニフェストを1つ" dist-test/test/window.test.js
+
+      - name: SHA256 を別の方法でも確かめる
+        id: files
+        shell: pwsh
+        run: |
+          $dir = 'release/windows'
+          $exe = Get-ChildItem $dir -Filter '*.exe' | Select-Object -First 1
+          $lines = Get-Content (Join-Path $dir 'SHA256SUMS.txt') -Encoding utf8 | Where-Object { $_ -match '^[0-9a-f]{64}  ' }
+          foreach ($line in $lines) {
+            $hash, $name = $line -split '  ', 2
+            $actual = (Get-FileHash (Join-Path $dir $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $hash) { throw "$name の SHA256 が SHA256SUMS.txt と一致しません" }
+            Write-Host "OK $hash  $name"
+          }
+          $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $commitLine = Get-Content (Join-Path $dir 'BUILD-INFO.txt') -Encoding utf8 | Where-Object { $_ -like '*コミット*' }
+          if ($commitLine -notmatch $env:GITHUB_SHA) { throw 'BUILD-INFO.txt のコミットがビルド対象と一致しません' }
+          "exe-name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+          "exe-sha256=$sha" >> $env:GITHUB_OUTPUT
+
+      # build provenance：exe と SHA256SUMS が、このリポジトリ・このコミット・このワークフローで作られたことの証明。
+      # GitHub の Free / Pro / Team プランでは公開リポジトリだけで使える（非公開のあいだは BUILD-INFO.txt の記録で追跡する）
+      - name: build provenance（attestation）
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            ${{ env.APP_DIR }}/release/windows/*.exe
+            ${{ env.APP_DIR }}/release/windows/SHA256SUMS.txt
+
+      - name: artifact に上げる（確認用）
+        uses: actions/upload-artifact@v7
+        with:
+          name: koukai-check-windows-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            ${{ env.APP_DIR }}/release/windows/*.exe
+            ${{ env.APP_DIR }}/release/windows/SHA256SUMS.txt
+            ${{ env.APP_DIR }}/release/windows/BUILD-INFO.txt
+            ${{ env.APP_DIR }}/release/windows/THIRD-PARTY-NOTICES.txt
+            ${{ env.APP_DIR }}/release/windows/README-ja.txt
+
+  release:
+    name: GitHub Release（下書き）
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/koukai-check-v') || startsWith(github.ref, 'refs/tags/koukai-check-ci-test-') }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # Release の下書きを作る
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: koukai-check-windows-${{ github.sha }}
+          path: assets
+      - name: 下書きを作る（公開はしない）
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXE_NAME: ${{ needs.build.outputs.exe-name }}
+          EXE_SHA256: ${{ needs.build.outputs.exe-sha256 }}
+          PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          $version = (Get-Content (Join-Path $env:APP_DIR 'package.json') -Raw | ConvertFrom-Json).version
+          if ($env:TAG -like 'koukai-check-ci-test-*') {
+            $test = $true
+            $title = "[CI TEST・公開しない] 公開前チェック $version（Windows）$env:TAG"
+          } elseif ($env:TAG -eq "koukai-check-v$version") {
+            $test = $false
+            $title = "公開前チェック $version（Windows）"
+          } else {
+            throw "タグ $env:TAG が package.json のバージョン $version と一致しません（koukai-check-v$version にしてください）"
+          }
+          $existing = gh release list --repo $env:REPO --limit 100 --json tagName --jq ".[] | select(.tagName == `"$env:TAG`") | .tagName"
+          if ($existing) { throw "タグ $env:TAG の Release はすでにあります" }
+
+          $provenance = if ($env:PRIVATE -eq 'true') { '非公開リポジトリのため build provenance（attestation）は付けていません。追跡には BUILD-INFO.txt（コミット・ワークフローの実行）を使います。' } else { "build provenance を付けています。確認: gh attestation verify $env:EXE_NAME -R $env:REPO" }
+          $notes = @(
+            $(if ($test) { '> **配布の流れを確かめるための CI テストです。公開しないでください。確認後は Release とタグを削除してください。**'; '' })
+            "公開前チェック $version の Windows 版です。"
+            ''
+            "- ソースのコミット: $env:GITHUB_SHA"
+            "- ビルド: $env:RUN_URL"
+            "- $env:EXE_NAME の SHA256: ``$env:EXE_SHA256``"
+            "- $provenance"
+            ''
+            'ダウンロードしたファイルは、PowerShell で次のように確かめられます（SHA256SUMS.txt の値と比べてください）。'
+            ''
+            '```'
+            "Get-FileHash .\$env:EXE_NAME -Algorithm SHA256"
+            '```'
+          ) -join "`n"
+          $notesFile = Join-Path $env:RUNNER_TEMP 'notes.md'
+          Set-Content -Path $notesFile -Value $notes -Encoding utf8
+
+          # GitHub の Release は ASCII 以外のファイル名を受け付けず、別の名前（default.txt など）に変えてしまう
+          $bad = Get-ChildItem assets -File | Where-Object { $_.Name -notmatch '^[A-Za-z0-9._-]+$' }
+          if ($bad) { throw "添付するファイルの名前は ASCII にしてください: $($bad.Name -join ', ')" }
+          $files = Get-ChildItem assets -File | ForEach-Object { $_.FullName }
+          $ghArgs = @('release', 'create', $env:TAG) + $files + @('--repo', $env:REPO, '--draft', '--verify-tag', '--title', $title, '--notes-file', $notesFile)
+          if ($test) { $ghArgs += '--prerelease' }
+          gh @ghArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Release の下書きを作れませんでした' }
+          Write-Host "下書きを作りました（公開はしていません）: $title"
