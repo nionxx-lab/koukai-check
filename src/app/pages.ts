@@ -6,7 +6,7 @@
 import { TECH_LABELS, type CheckItem, type CheckStatus } from '../checks/build.js';
 import type { ScanResult } from '../detect/scan.js';
 import { escapeHtml as e } from '../report/escape.js';
-import { REPORT_STYLE } from '../report/html.js';
+import { COPY_SCRIPT, REPORT_STYLE } from '../report/html.js';
 import { APP_DOC_HOSTS } from '../shared/url.js';
 import { checkTokenInput } from '../supabase/token-check.js';
 import type { TokenProblem } from './token-guide.js';
@@ -85,6 +85,14 @@ details.more{margin:8px 0 0;font-size:14px}details.more summary{cursor:pointer;c
 details.more{color:var(--fg)}
 .locs{margin:6px 0 0 18px;padding:0;color:inherit;background:transparent}
 .loc{display:block;margin:2px 0;padding:0;color:inherit;background:transparent;opacity:1;visibility:visible;font:inherit;font-size:14px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;text-indent:0}
+.overview h2{margin-top:0}
+.overview .summary{margin-bottom:14px}
+.jump{margin:0 0 14px;padding-left:20px;font-size:15px}.jump li{margin:4px 0}
+.card{scroll-margin-top:16px}
+.guide{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
+.guide h4{margin:0 0 6px;font-size:16px}
+.guide ol.steps{margin:6px 0 0}
+.guide .note{margin:4px 0 8px}
 `;
 
 // フォーム送信時に「処理中…」を表示し、二重送信を防ぐだけのスクリプト
@@ -179,7 +187,57 @@ const STATUS_LABEL: Record<CheckStatus, { label: string; order: number }> = {
   ok: { label: '✅ 問題は見つかりませんでした', order: 4 },
 };
 
-function renderCheck(item: CheckItem, opts: { base: string; path: string }): string {
+/** 🔴・🟠 の項目の「直し方」と「AIに修正を頼む」。依頼文は textarea の中身として出す（スクリプトには含めない） */
+function renderGuide(item: CheckItem, index: number): string {
+  const g = item.guide;
+  if (!g) return '';
+  const promptId = `fix-prompt-${index}`;
+  const judgement = g.judgement ? `<p class="note">${e(g.judgement)}</p>` : '';
+  return `<section class="guide">
+    <h4>直し方</h4>
+    ${judgement}
+    <ol class="steps">${g.steps.map((s) => `<li>${e(s)}</li>`).join('')}</ol>
+    <div class="ai">
+      <h4>AIに修正を頼む</h4>
+      <p class="hint">Claude Code・Codex・Cursor などに、そのまま貼り付けて使えます。指示には、秘密の値やパソコンのフォルダの場所は入れていません。キーの作り直しなど、あなた自身が行う操作も書いてあります。</p>
+      <button type="button" class="copy" data-target="${promptId}">AIに修正を頼む指示をコピー</button>
+      <span class="copied" role="status" aria-live="polite"></span>
+      <details class="prompt-preview"><summary>指示の内容を見る</summary>
+        <textarea id="${promptId}" readonly rows="14">${e(g.aiPrompt)}</textarea>
+      </details>
+    </div>
+  </section>`;
+}
+
+/** 同じフォルダをもう一度チェックするリンク（既存の scan?path= を使う） */
+function recheckLink(base: string, path: string, secondary = false): string {
+  return `<a class="btn${secondary ? ' secondary' : ''}" href="${e(base)}scan?path=${q(path)}">修正したら、もう一度チェックする</a>`;
+}
+
+/** 結果のまとめ（件数は、実際に表示する 🔴・🟠 のカードの数と同じ） */
+function renderOverview(cards: { item: CheckItem; anchor: string }[], base: string, path: string): string {
+  const danger = cards.filter((c) => c.item.status === 'danger');
+  const warn = cards.filter((c) => c.item.status === 'warn');
+  const jump = [...danger, ...warn]
+    .map((c) => `<li><a href="#${c.anchor}">${e(STATUS_LABEL[c.item.status].label.split(' ')[0] ?? '')} ${e(c.item.title)}</a></li>`)
+    .join('');
+  const body =
+    danger.length + warn.length > 0
+      ? `<ul class="jump" aria-label="直す・確認する項目">${jump}</ul>
+  <p class="hint">項目を押すと、その項目の「直し方」へ移動します。上から順に進めてください。1つの項目に、複数の場所が含まれることがあります。</p>`
+      : `<p>公開前に直すもの・確認をおすすめのものは見つかりませんでした。ただし、このツールが確認できる範囲だけの結果です。問題が表示されないことは、安全の保証ではありません。</p>`;
+  return `<section class="panel overview" aria-labelledby="overview-title">
+  <h2 id="overview-title">結果のまとめ</h2>
+  <ul class="summary" aria-label="件数">
+    <li>🔴 公開前に直すもの<b>${danger.length}</b>件</li>
+    <li>🟠 確認をおすすめ<b>${warn.length}</b>件</li>
+  </ul>
+  ${body}
+  <p>${recheckLink(base, path, true)}</p>
+</section>`;
+}
+
+function renderCheck(item: CheckItem, opts: { base: string; path: string; anchor: string; index: number }): string {
   const status = STATUS_LABEL[item.status];
   const points = item.points && item.points.length > 0 ? `<ul class="points">${item.points.slice(0, 30).map((p) => `<li><code>${e(p)}</code></li>`).join('')}</ul>` : '';
   // 折りたたみの中身は、1件ずつ <div> に「ファイル名:行番号」を本文の文字として直接入れる（箇条書き・疑似要素・属性は使わない）。
@@ -196,10 +254,11 @@ function renderCheck(item: CheckItem, opts: { base: string; path: string }): str
   const action = item.supabase
     ? `<p><a class="btn" href="${e(opts.base)}supabase?path=${q(opts.path)}">Supabase のチェックを始める</a></p>`
     : '';
-  return `<article class="card sev-${item.status === 'danger' ? 'danger' : item.status}">
+  return `<article class="card sev-${item.status === 'danger' ? 'danger' : item.status}" id="${e(opts.anchor)}">
   <header><span class="status st-${item.status}">${e(status.label)}</span>
   <h3>${e(item.title)}</h3><p class="target">${e(TECH_LABELS[item.tech].name)}</p></header>
   <section><p>${e(item.body)}</p>${points}${details}</section>
+  ${renderGuide(item, opts.index)}
   ${action}${link}
 </article>`;
 }
@@ -221,8 +280,11 @@ export function scanPage(opts: { base: string; csrf: string; nonce: string; scan
     scan.techs.length > 0
       ? `<ul class="chips">${scan.techs.map((t) => `<li>${e(TECH_LABELS[t.id].name)}<span>${e(TECH_LABELS[t.id].description)}</span></li>`).join('')}</ul>`
       : `<p class="msg">${e(noTechMessage(scan))}</p>`;
-  const sorted = [...opts.checks].sort((a, b) => STATUS_LABEL[a.status].order - STATUS_LABEL[b.status].order);
-  const cards = sorted.length > 0 ? sorted.map((c) => renderCheck(c, { base: opts.base, path: scan.root })).join('\n') : '<p class="empty">このフォルダでは、表示するチェックがありませんでした。</p>';
+  const sorted = [...opts.checks]
+    .sort((a, b) => STATUS_LABEL[a.status].order - STATUS_LABEL[b.status].order)
+    .map((item, index) => ({ item, index, anchor: `check-${index + 1}` }));
+  const cards = sorted.length > 0 ? sorted.map((c) => renderCheck(c.item, { base: opts.base, path: scan.root, anchor: c.anchor, index: c.index })).join('\n') : '<p class="empty">このフォルダでは、表示するチェックがありませんでした。</p>';
+  const overview = renderOverview(sorted, opts.base, scan.root);
   // 件数の上限に達したときだけ知らせる（深さの上限はふつうのアプリでも当たるため、知らせない）。
   // 直下の package.json・.env・設定ファイルは上限に関係なく確認しているので、選び直しは求めない
   const truncated = scan.stats.truncated
@@ -238,6 +300,7 @@ export function scanPage(opts: { base: string; csrf: string; nonce: string; scan
 <h1>チェック結果</h1>
 <p class="verdict">「${e(scan.rootName)}」をチェックしました</p>
 <p class="path">${e(scan.root)}</p>
+${overview}
 <h2>使われている技術</h2>
 ${techs}
 ${truncated}
@@ -246,7 +309,8 @@ ${truncated}
 ${cards}
 <details class="tech"><summary>技術的な詳細を見る（判定の根拠）</summary><ul>${detected}</ul>
 <p class="raw-label">調べたファイル・フォルダの数: ${scan.stats.entries}${scan.stats.unreadable ? `（読み取れなかったもの: ${scan.stats.unreadable}）` : ''}</p></details>
-<div class="row actions">${quitForm(opts.base, opts.csrf)}</div>`,
+<div class="row actions">${recheckLink(opts.base, scan.root)}${quitForm(opts.base, opts.csrf)}</div>`,
+    COPY_SCRIPT,
   );
 }
 

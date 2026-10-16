@@ -7,8 +7,8 @@
 // MinGW-w64 の gcc は既定のマニフェスト（default-manifest.o）を必ずリンクし、配布によっては重複したまま残るため
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION 0,2,0,0
+PRODUCTVERSION 0,2,0,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -18,8 +18,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "公開前チェック（画面）"
       VALUE "ProductName", "公開前チェック"
-      VALUE "FileVersion", "0.1.0"
-      VALUE "ProductVersion", "0.1.0"
+      VALUE "FileVersion", "0.2.0"
+      VALUE "ProductVersion", "0.2.0"
       VALUE "InternalName", "koukai-check-window"
       VALUE "OriginalFilename", "koukai-check-window.exe"
       VALUE "CompanyName", "nionxx-lab"

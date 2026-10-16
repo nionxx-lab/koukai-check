@@ -178,3 +178,66 @@ describe('ライセンス（本体：PolyForm Shield 1.0.0・第三者のソフ�
     }
   });
 });
+
+// 配布する版（バージョン）は package.json を正本にして、ほかの場所がすべて一致することを確かめる。
+// 版を上げるときは、ここに挙げた場所をまとめて直す（どれか1つでもずれたら止める）。
+describe('バージョンの整合（package.json が正本）', () => {
+  const version = (JSON.parse(read('package.json')) as { version: string }).version;
+  const [major, minor, patch] = version.split('.');
+
+  it('この版は 0.2.0', () => {
+    assert.equal(version, '0.2.0');
+  });
+
+  it('package-lock.json の版が同じ', () => {
+    const lock = JSON.parse(read('package-lock.json')) as { version: string; packages: Record<string, { version?: string }> };
+    assert.equal(lock.version, version);
+    assert.equal(lock.packages['']?.version, version);
+  });
+
+  it('専用ウィンドウ（koukai-check-window.exe）のバージョン情報とマニフェストが同じ版', () => {
+    const rc = read('native/windows-host/app.rc');
+    assert.match(rc, new RegExp(`^FILEVERSION ${major},${minor},${patch},0$`, 'm'));
+    assert.match(rc, new RegExp(`^PRODUCTVERSION ${major},${minor},${patch},0$`, 'm'));
+    assert.match(rc, new RegExp(`VALUE "FileVersion", "${version.replace(/\./g, '\.')}"`));
+    assert.match(rc, new RegExp(`VALUE "ProductVersion", "${version.replace(/\./g, '\.')}"`));
+    assert.match(read('native/windows-host/app.manifest'), new RegExp(`name="koukai-check\.window" version="${version.replace(/\./g, '\.')}\.0"`));
+  });
+
+  it('同梱の README-ja：見出しの版・exe の名前が同じ版で、ほかの版を書いていない', () => {
+    const text = read('release/windows/README-ja.txt');
+    assert.match(text, new RegExp(`^公開前チェック（Windows 版） koukai-check ${version.replace(/\./g, '\.')}$`, 'm'));
+    const exeNames = [...text.matchAll(/koukai-check-(\d+\.\d+\.\d+)-win-x64\.exe/g)].map((m) => m[1]);
+    assert.ok(exeNames.length >= 2);
+    assert.ok(exeNames.every((v) => v === version), exeNames.join(', '));
+  });
+
+  it('exe の名前・製品バージョンは、ビルドのときに package.json から作る（固定の版を書いていない）', () => {
+    const script = read('scripts/build-windows-exe.mjs');
+    assert.match(script, /const outName = `\$\{pkg\.name\}-\$\{pkg\.version\}-win-x64\.exe`;/);
+    assert.match(script, /pkg\.version\.split\('\.'\)/);
+    assert.match(script, /setProductVersion\(major, minor, patch, 0/);
+  });
+
+  it('exe の検査（test/window.test.ts）が見る exe の名前が同じ版', () => {
+    const names = [...read('test/window.test.ts').matchAll(/koukai-check-(\d+\.\d+\.\d+)-win-x64\.exe/g)].map((m) => m[1]);
+    assert.ok(names.length >= 1);
+    assert.ok(names.every((v) => v === version), names.join(', '));
+  });
+
+  it('CHANGELOG の先頭がこの版の項目（過去の版の項目は残す）', () => {
+    const headings = [...read('CHANGELOG.md').matchAll(/^## (.+)$/gm)].map((m) => m[1] ?? '');
+    assert.ok(headings[0]?.startsWith(`${version}：`), headings[0]);
+    assert.ok(headings.some((h) => h.startsWith('0.1.0（最初の公開版')), '0.1.0 の項目を消さない');
+    assert.ok(!headings.some((h) => h.startsWith('未リリース')), '未リリースの見出しを残さない');
+  });
+
+  it('Release のワークフローは、タグ koukai-check-v<package.json の版> だけを本番の Release にする', () => {
+    const workflow = read(WORKFLOW);
+    assert.match(workflow, /\$version = \(Get-Content \(Join-Path \$env:APP_DIR 'package\.json'\) -Raw \| ConvertFrom-Json\)\.version/);
+    assert.match(workflow, /\$env:TAG -eq "koukai-check-v\$version"/);
+    assert.match(workflow, /throw "タグ \$env:TAG が package\.json のバージョン \$version と一致しません/);
+    // この版の正しいタグ名
+    assert.equal(`koukai-check-v${version}`, 'koukai-check-v0.2.0');
+  });
+});

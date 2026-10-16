@@ -7,6 +7,7 @@ import type { RuleFinding } from '../detect/firebase-rules.js';
 import type { HistoryFinding } from '../detect/git-history.js';
 import { SECRET_DEFINITIONS } from '../detect/secret-defs.js';
 import type { SecretValueReason } from '../detect/secret-names.js';
+import { attachGuide, type FixGuide } from '../explanations/fix-guides.js';
 
 export type CheckStatus =
   | 'danger' // 公開前に直すべき可能性が高い（自動で見つかった）
@@ -29,6 +30,8 @@ export interface CheckItem {
   link?: { href: string; label: string };
   /** Supabase 診断へ進む */
   supabase?: { refs: string[] };
+  /** 🔴・🟠 の項目の直し方と、AIへの修正依頼文（値・絶対パスは含めない） */
+  guide?: FixGuide;
 }
 
 export const TECH_LABELS: Record<TechId, { name: string; description: string }> = {
@@ -653,5 +656,6 @@ export function buildChecks(scan: ScanResult): CheckItem[] {
     });
   }
 
-  return items;
+  // 🔴・🟠 の項目に、直し方と AI への修正依頼文を付ける
+  return items.map((item) => attachGuide(item, scan.root));
 }

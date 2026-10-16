@@ -258,7 +258,8 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);font-si
 `;
 
 // クリップボードへのコピーだけを行う。診断データはスクリプトに含めず、textarea の値を読む。
-const SCRIPT = `
+// アプリのチェック結果の画面（src/app/pages.ts）でも同じものを使う。
+export const COPY_SCRIPT = `
 document.addEventListener('click', async function (ev) {
   var btn = ev.target instanceof Element ? ev.target.closest('button.copy') : null;
   if (!btn) return;
@@ -322,7 +323,7 @@ export function renderReportHtml(report: DiagnosticReport, options: RenderOption
       終了したあとも、このページはそのまま見ることができます（再読み込みはできません）。`}</p>
   </footer>
 </main>
-<script nonce="${nonce}">${SCRIPT}</script>
+<script nonce="${nonce}">${COPY_SCRIPT}</script>
 </body>
 </html>`;
 }

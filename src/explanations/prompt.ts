@@ -46,25 +46,53 @@ function bullets(items: string[]): string {
   return items.map((item) => `- ${item}`).join('\n');
 }
 
+/** 修正依頼文の組み立て（Supabase の診断・フォルダのチェックで共通の形） */
+export interface FixPromptParts {
+  /** 冒頭の状況説明（1行ずつ） */
+  intro: string[];
+  task: string;
+  checks: string[];
+  rules: string[];
+  /** 利用者（開発者）自身が行う操作。AIには行わせない（キーの無効化・再発行など） */
+  ownerActions?: string[];
+  finalReport: string[];
+}
+
+export function composeFixPrompt(parts: FixPromptParts): string {
+  const lines: string[] = [...parts.intro];
+  lines.push('');
+  lines.push('## お願いしたいこと');
+  lines.push(parts.task);
+  lines.push('');
+  lines.push('## 変更する前に、まず確認してほしいこと');
+  lines.push(numbered(parts.checks));
+  lines.push('');
+  lines.push('## 守ってほしいこと');
+  lines.push(bullets(parts.rules));
+  if (parts.ownerActions && parts.ownerActions.length > 0) {
+    lines.push('');
+    lines.push('## 私（開発者）が自分で行うこと（あなたは行わないでください）');
+    lines.push(bullets(parts.ownerActions));
+  }
+  lines.push('');
+  lines.push('## 最後に説明してほしいこと');
+  lines.push(bullets(parts.finalReport));
+  return lines.join('\n');
+}
+
 export function buildAiFixPrompt(input: PromptInput): string {
   const fill = (text: string) => fillTemplate(text, input.ctx);
   const detail = sanitizeForPrompt(input.officialDetail);
 
-  const lines: string[] = [];
-  lines.push(`Supabaseプロジェクトの${input.ctx.target}について、Supabase Security Advisor で「${sanitizeForPrompt(input.advisorName, 100)}」の指摘が出ています。`);
-  if (detail) lines.push(`Supabaseの指摘内容（英語）: ${detail}`);
-  if (input.helpUrl) lines.push(`公式の解説: ${input.helpUrl}`);
-  lines.push('');
-  lines.push('## お願いしたいこと');
-  lines.push(fill(input.spec.task));
-  lines.push('');
-  lines.push('## 変更する前に、まず確認してほしいこと');
-  lines.push(numbered([...COMMON_CHECKS, ...(input.spec.extraChecks ?? [])].map(fill)));
-  lines.push('');
-  lines.push('## 守ってほしいこと');
-  lines.push(bullets([...COMMON_RULES, ...(input.spec.extraRules ?? [])].map(fill)));
-  lines.push('');
-  lines.push('## 最後に説明してほしいこと');
-  lines.push(bullets(FINAL_REPORT));
-  return lines.join('\n');
+  const intro: string[] = [];
+  intro.push(`Supabaseプロジェクトの${input.ctx.target}について、Supabase Security Advisor で「${sanitizeForPrompt(input.advisorName, 100)}」の指摘が出ています。`);
+  if (detail) intro.push(`Supabaseの指摘内容（英語）: ${detail}`);
+  if (input.helpUrl) intro.push(`公式の解説: ${input.helpUrl}`);
+  return composeFixPrompt({
+    intro,
+    task: fill(input.spec.task),
+    checks: [...COMMON_CHECKS, ...(input.spec.extraChecks ?? [])].map(fill),
+    rules: [...COMMON_RULES, ...(input.spec.extraRules ?? [])].map(fill),
+    finalReport: FINAL_REPORT,
+  });
 }

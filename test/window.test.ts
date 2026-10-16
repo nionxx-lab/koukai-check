@@ -26,7 +26,7 @@ const GUARD = fileURLToPath(new URL('./helpers/network-guard.js', import.meta.ur
 const PKG_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const HOST_CPP = join(PKG_ROOT, 'native', 'windows-host', 'host.cpp');
 const BUILD_SCRIPT = new URL('../../scripts/build-windows-exe.mjs', import.meta.url).href;
-const RELEASE_EXE = join(PKG_ROOT, 'release', 'windows', 'koukai-check-0.1.0-win-x64.exe');
+const RELEASE_EXE = join(PKG_ROOT, 'release', 'windows', 'koukai-check-0.2.0-win-x64.exe');
 const APP_URL = 'http://127.0.0.1:43210/r/0123456789abcdef0123456789abcdef/';
 
 const roots: string[] = [];
@@ -534,7 +534,7 @@ describe('Windows 版のビルド処理', () => {
     assert.ok(exe.includes(Buffer.from('windows-host/koukai-check-window.exe')), 'assets の名前が入っている');
     assert.ok(existsSync(join(PKG_ROOT, 'release', 'windows', 'THIRD-PARTY-NOTICES.txt')));
     // Release に添付するファイルすべての SHA256 と、ビルドしたソースのコミット
-    for (const name of ['koukai-check-0.1.0-win-x64.exe', 'THIRD-PARTY-NOTICES.txt', 'BUILD-INFO.txt', 'README-ja.txt']) {
+    for (const name of ['koukai-check-0.2.0-win-x64.exe', 'THIRD-PARTY-NOTICES.txt', 'BUILD-INFO.txt', 'README-ja.txt']) {
       assert.ok(sums.split(/\r?\n/).some((l) => /^[0-9a-f]{64}  /.test(l) && l.slice(66) === name), name);
     }
     assert.match(sums, /^# ソースのコミット: ([0-9a-f]{40}|unknown)/m);
