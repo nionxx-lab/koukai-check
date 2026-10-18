@@ -7,7 +7,7 @@
 // 値を見るのは、直書きか参照か、本物らしいかを見分けるためだけで、判定が終わったら捨てる。
 
 import { PUBLIC_ENV_PREFIXES } from './env.js';
-import { classifyKeyBody, cleanPemLine } from './key-structure.js';
+import { classifyKeyBody, pemBodyLines } from './key-structure.js';
 import { SECRET_DEFINITIONS, type SecretDefinition, type ValueCheck } from './secret-defs.js';
 
 /** 見つけた場所の種類 */
@@ -172,11 +172,13 @@ function runCheck(check: ValueCheck, v: string): SecretValue | undefined {
       return { kind: 'real-like', reason: 'url-credentials' };
     }
     case 'pem-private-key': {
-      const m = /-----BEGIN ([A-Z ]*)PRIVATE KEY-----([\s\S]*?)-----END/.exec(v.replace(/\\n/g, '\n'));
+      const text = v.replace(/\\n/g, '\n');
+      const m = /-----BEGIN ([A-Z ]*)PRIVATE KEY-----([\s\S]*?)-----END/.exec(text);
       if (!m) return undefined;
       // 鍵の本体は、語ではなく構造で判定する（本物の鍵にも test などの並びが偶然含まれるため）。見出し行（Proc-Type など）は除く
-      const lines = (m[2] ?? '').split('\n').map(cleanPemLine);
-      // 行を整えるとカンマが消えるので、Proc-Type の見出しはカンマの有無を問わない
+      // コードの文字列リテラルとして連結して書いた鍵も、引用符の内側だけをつないで本体を取り出す
+      const lines = pemBodyLines(text, m.index, m[2] ?? '');
+      // Proc-Type の見出しは、カンマの有無を問わない
       const legacyEncrypted = lines.some((l) => /^Proc-Type:4,?ENCRYPTED/i.test(l)) && !/ENCRYPTED|OPENSSH/.test(m[1] ?? '');
       const body = lines.filter((l) => !l.includes(':')).join('');
       const judged = classifyKeyBody(legacyEncrypted ? 'legacy-encrypted' : (m[1] ?? ''), body);

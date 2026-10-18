@@ -4,6 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -269,5 +270,110 @@ describe('秘密鍵：フォルダのチェック結果', () => {
     const points = history.flatMap((c) => c.points ?? []);
     assert.ok(points.some((p) => p.includes('real.pem')), points.join(' / '));
     assert.ok(points.some((p) => p.includes('unsure.pem') && p.includes('本物か判断できない')), points.join(' / '));
+  });
+});
+
+// ───────────── 5. コードの中で、文字列を連結して書いた鍵 ─────────────
+// 本物の鍵（Node で作る）を、同じ行・複数の行の文字列リテラルに分けて書く。値はアサーションのメッセージにも出さない。
+
+/** 本物の鍵の本体（base64・改行なし） */
+function realBody(type: 'ed25519' | 'rsa'): string {
+  const key = type === 'ed25519' ? generateKeyPairSync('ed25519').privateKey : generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+  return key.export({ type: 'pkcs8', format: 'pem' }).toString().split('\n').filter((l) => l && !l.startsWith('-----')).join('');
+}
+/** 本体に + を含む本物の鍵（含むまで作り直す。RSA の本体はほぼ必ず + を含む） */
+function realBodyWithPlus(): string {
+  for (;;) {
+    const body = realBody('rsa');
+    const at = body.indexOf('+', 100);
+    if (at > 0 && at < body.length - 100) return body;
+  }
+}
+/** 本体を n 個に分ける（分け目の位置は呼び出し側で指定できる） */
+function split(body: string, cuts: number[]): string[] {
+  const out: string[] = [];
+  let from = 0;
+  for (const c of [...cuts, body.length]) {
+    out.push(body.slice(from, c));
+    from = c;
+  }
+  return out;
+}
+const BEGIN = '-----BEGIN PRIVATE KEY-----';
+const END = '-----END PRIVATE KEY-----';
+// ソースコードに書かれる「\n」（バックスラッシュと n の2文字）
+const NL = '\\n';
+const sameLine = (parts: string[], q = '"', op = ' + ') => `export const KEY = ${q}${BEGIN}${NL}${q}${op}${parts.map((p) => `${q}${p}${q}`).join(op)}${op}${q}${NL}${END}${q};\n`;
+const value = (text: string | undefined) => findPrivateKey(text ?? '')?.value;
+
+describe('秘密鍵：コードの中で文字列を連結して書いた鍵', () => {
+  it('本物の Ed25519（PKCS#8）の鍵を、同じ行で複数の断片に分けても 🔴 の対象（本物）になる', () => {
+    const body = realBody('ed25519');
+    assert.equal(value(sameLine(split(body, [20, 41]))), 'real-like');
+    assert.equal(value(sameLine(split(body, [10, 30, 50]))), 'real-like');
+  });
+
+  it('本体に + を含む鍵：+ を壊さずに本物として数える。分け目が + の直後でも（連結の + と本体の + が並んでも）本物', () => {
+    const body = realBodyWithPlus();
+    const plus = body.indexOf('+', 100);
+    assert.equal(value(sameLine([body])), 'real-like', '1つの文字列');
+    assert.equal(value(sameLine(split(body, [plus + 1]))), 'real-like', '断片が + で終わる');
+    assert.equal(value(sameLine(split(body, [plus]))), 'real-like', '断片が + で始まる');
+    assert.equal(value(sameLine(split(body, [plus, plus + 1]))), 'real-like', '+ だけの断片');
+    // 引用符の外にある PEM ファイルの + も壊さない（これまでどおり）
+    assert.equal(value(`${BEGIN}\n${body.match(/.{1,64}/g)?.join('\n')}\n${END}\n`), 'real-like');
+  });
+
+  it('空白・改行・引用符・行末の書き方が違っても、同じ本体を取り出す', () => {
+    const body = realBodyWithPlus();
+    const parts = split(body, [300, 700, 1100]);
+    const lines = body.match(/.{1,64}/g) ?? [];
+    for (const [label, code] of [
+      ['空白なし', sameLine(parts, '"', '+')],
+      ['タブ', sameLine(parts, '"', '\t+\t')],
+      ['シングルクォート', sameLine(parts, "'")],
+      ['テンプレートリテラル', sameLine(parts, '`')],
+      ['行末に +', `const KEY = "${BEGIN}${NL}" +\n  ${parts.map((p) => `"${p}"`).join(' +\n  ')} +\n  "${NL}${END}";\n`],
+      ['行頭に +', `const KEY = "${BEGIN}${NL}"\n  + ${parts.map((p) => `"${p}"`).join('\n  + ')}\n  + "${NL}${END}";\n`],
+      ['CRLF', `const KEY = "${BEGIN}${NL}" +\r\n  ${parts.map((p) => `"${p}"`).join(' +\r\n  ')} +\r\n  "${NL}${END}";\r\n`],
+      ['1行ずつ \\n 付きの文字列', `const KEY =\n  "${BEGIN}${NL}" +\n${lines.map((l) => `  "${l}${NL}" +`).join('\n')}\n  "${END}";\n`],
+      ['配列の join', `const KEY = ["${BEGIN}", ${lines.map((l) => `"${l}"`).join(', ')}, "${END}"].join("${NL}");\n`],
+      ['JSON のエスケープ（\\/）', `{"key": "${BEGIN}${NL}${body.replace(/\//g, '\\/')}${NL}${END}${NL}"}\n`],
+    ] as const) {
+      assert.equal(value(code), 'real-like', label);
+    }
+  });
+
+  it('鍵ではない連結した文字列は 🔴 にしない（見本・変数との連結・鍵の構造ではない中身）', () => {
+    assert.equal(value(sameLine(['YOUR', '_PRIVATE', '_KEY'])), 'test-like', '見本の文字');
+    assert.equal(value(`const KEY = "${BEGIN}${NL}" + process.env.KEY_BODY + "${NL}${END}";\n`), 'test-like', '変数との連結（中身はコードに書かれていない）');
+    const notKey = Buffer.concat([Buffer.from([0x41]), prng(3)(900)]).toString('base64');
+    assert.equal(value(sameLine(split(notKey, [400]))), 'uncertain', '鍵の構造ではない中身は「判断できない」のまま（🔴 にはしない）');
+  });
+
+  it('名前つきの秘密情報（GitHub App の秘密鍵）も同じ取り出し方をする', () => {
+    const def = SECRET_DEFINITIONS.find((d) => d.id === 'github-app-private-key');
+    assert.ok(def);
+    const body = realBodyWithPlus();
+    const plus = body.indexOf('+', 100);
+    const code = sameLine(split(body, [plus + 1])).replace(/^export const KEY = /, '').replace(/;\n$/, '');
+    assert.equal(classifySecretValue(def, code).kind, 'real-like');
+  });
+
+  it('Git で管理されたソースファイルに書いた、連結した本物の鍵は 🔴（公開フォルダの中も 🔴）', { skip: !hasGit && 'git がない' }, () => {
+    const body = realBodyWithPlus();
+    const plus = body.indexOf('+', 100);
+    const code = sameLine(split(body, [plus + 1, 900]));
+    const root = project({ 'package.json': '{"name":"app"}', 'src/keys.ts': code, 'public/keys.js': code });
+    git(root, 'init', '-q');
+    git(root, 'add', '-f', '--', 'src/keys.ts', 'public/keys.js');
+    const list = buildChecks(scanProject(root));
+    const danger = list.find((c) => c.id === 'private-key-danger');
+    assert.ok(danger?.points?.some((p) => p.startsWith('src/keys.ts')), '連結した本物の鍵は 🔴');
+    assert.ok(!list.find((c) => c.id === 'private-key-warn')?.points?.some((p) => p.startsWith('src/keys.ts')), '🟠 に下げない');
+    assert.ok(list.find((c) => c.id === 'public-folder-danger')?.points?.some((p) => p.startsWith('public/keys.js')), '公開フォルダの中も 🔴');
+    // 画面に出す文字列・依頼文に、鍵の値が入らない
+    const text = JSON.stringify(list);
+    for (const part of [body.slice(100, 140), body.slice(-40)]) assert.ok(!text.includes(part), '鍵の値が結果に含まれていない');
   });
 });

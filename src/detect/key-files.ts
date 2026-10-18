@@ -7,7 +7,7 @@
 // ・本物か判断できないものは、安全とは扱わず uncertain（確認をおすすめ）にする
 // ・鍵・値は外へ出さない。返すのは種類・行番号・暗号化の有無だけ
 
-import { classifyKeyBody, cleanPemLine, type KeyBodyValue } from './key-structure.js';
+import { classifyKeyBody, pemBodyLines, type KeyBodyValue } from './key-structure.js';
 
 /** pem：PKCS#1/#8・EC などの PEM／openssh：OpenSSH 形式／pgp：PGP の秘密鍵／putty：PuTTY の鍵／service-account：Google・Firebase のサービスアカウント鍵 */
 export type PrivateKeyKind = 'pem' | 'openssh' | 'pgp' | 'putty' | 'service-account';
@@ -54,9 +54,10 @@ export function findPrivateKey(text: string, onBody?: (body: string) => void): P
   const pem = /-----BEGIN ((?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?)PRIVATE KEY-----([\s\S]*?)-----END \1PRIVATE KEY-----/.exec(normalized);
   if (pem) {
     const label = pem[1] ?? '';
-    const lines = (pem[2] ?? '').split('\n').map(cleanPemLine);
+    // コードの文字列リテラルとして連結して書いた鍵も、引用符の内側だけをつないで本体を取り出す
+    const lines = pemBodyLines(normalized, pem.index, pem[2] ?? '');
     // 古い暗号化 PEM（Proc-Type: 4,ENCRYPTED）の見出し行は除く
-    // 行を整えるとカンマが消えるので、Proc-Type の見出しはカンマの有無を問わない
+    // Proc-Type の見出しは、カンマの有無を問わない
     const encrypted = label === 'ENCRYPTED ' || lines.some((l) => /^Proc-Type:4,?ENCRYPTED/i.test(l));
     const body = lines.filter((l) => !l.includes(':')).join('');
     const kind: PrivateKeyKind = label === 'OPENSSH ' ? 'openssh' : 'pem';
