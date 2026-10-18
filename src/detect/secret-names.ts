@@ -7,6 +7,7 @@
 // 値を見るのは、直書きか参照か、本物らしいかを見分けるためだけで、判定が終わったら捨てる。
 
 import { PUBLIC_ENV_PREFIXES } from './env.js';
+import { classifyKeyBody, cleanPemLine } from './key-structure.js';
 import { SECRET_DEFINITIONS, type SecretDefinition, type ValueCheck } from './secret-defs.js';
 
 /** 見つけた場所の種類 */
@@ -35,6 +36,7 @@ export type SecretValueReason =
   | 'token-format'
   | 'url-credentials'
   | 'private-key'
+  | 'key-unverified'
   | 'test-word'
   | 'too-short'
   | 'low-randomness'
@@ -172,10 +174,15 @@ function runCheck(check: ValueCheck, v: string): SecretValue | undefined {
     case 'pem-private-key': {
       const m = /-----BEGIN ([A-Z ]*)PRIVATE KEY-----([\s\S]*?)-----END/.exec(v.replace(/\\n/g, '\n'));
       if (!m) return undefined;
-      const body = (m[2] ?? '').replace(/[\s"'+,]/g, '');
-      if (TEST_WORDS.test(body)) return { kind: 'test-like', reason: 'test-word' };
-      if (body.length < 200) return { kind: 'test-like', reason: 'too-short' };
-      return { kind: 'real-like', reason: 'private-key' };
+      // 鍵の本体は、語ではなく構造で判定する（本物の鍵にも test などの並びが偶然含まれるため）。見出し行（Proc-Type など）は除く
+      const lines = (m[2] ?? '').split('\n').map(cleanPemLine);
+      // 行を整えるとカンマが消えるので、Proc-Type の見出しはカンマの有無を問わない
+      const legacyEncrypted = lines.some((l) => /^Proc-Type:4,?ENCRYPTED/i.test(l)) && !/ENCRYPTED|OPENSSH/.test(m[1] ?? '');
+      const body = lines.filter((l) => !l.includes(':')).join('');
+      const judged = classifyKeyBody(legacyEncrypted ? 'legacy-encrypted' : (m[1] ?? ''), body);
+      if (judged.value === 'real-like') return { kind: 'real-like', reason: 'private-key' };
+      if (judged.value === 'uncertain') return { kind: 'uncertain', reason: 'key-unverified' };
+      return { kind: 'test-like', reason: body.length < 40 ? 'too-short' : 'not-token-format' };
     }
   }
 }

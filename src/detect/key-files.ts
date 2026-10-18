@@ -3,40 +3,31 @@
 // 方針：
 // ・ファイル名や拡張子だけでは判定しない（.pem には公開してよい証明書もある）。中身の形が公式の形式に当てはまるものだけ
 // ・本物らしさは、鍵の本体が正しい形（base64 を戻すと ASN.1 / openssh-key-v1 の形）かどうかで確かめる。形が崩れたダミーは数えない
+// ・鍵の本体に「test」「fake」などの語が含まれるかでは判定しない（本物の鍵にも偶然含まれるため。src/detect/key-structure.ts）
+// ・本物か判断できないものは、安全とは扱わず uncertain（確認をおすすめ）にする
 // ・鍵・値は外へ出さない。返すのは種類・行番号・暗号化の有無だけ
+
+import { classifyKeyBody, cleanPemLine, type KeyBodyValue } from './key-structure.js';
 
 /** pem：PKCS#1/#8・EC などの PEM／openssh：OpenSSH 形式／pgp：PGP の秘密鍵／putty：PuTTY の鍵／service-account：Google・Firebase のサービスアカウント鍵 */
 export type PrivateKeyKind = 'pem' | 'openssh' | 'pgp' | 'putty' | 'service-account';
 
 export interface PrivateKeyMatch {
   kind: PrivateKeyKind;
-  /** real-like：本物の形／test-like：形は似ているが、テスト用の語を含む・本体が崩れている */
-  value: 'real-like' | 'test-like';
+  /** real-like：本物の鍵の構造／test-like：はっきりしたダミー（見本の文字・同じ値の繰り返し）／uncertain：本物か判断できない */
+  value: KeyBodyValue;
   /** パスフレーズで暗号化されている */
   encrypted: boolean;
   line: number;
 }
 
+// OAuth クライアントの秘密（client_secret.json）の見本の値を見分けるための語（鍵の本体の判定には使わない）
 const TEST_WORDS = /test|fake|dummy|mock|example|sample|placeholder|redacted|invalid|not[-_]?a[-_]?real|changeme|your[-_]|xxxx/i;
 
 function lineAt(text: string, index: number): number {
   let line = 1;
   for (let i = 0; i < index; i++) if (text.charCodeAt(i) === 10) line++;
   return line;
-}
-
-/** PEM の本体（base64）が、鍵として正しい形か */
-function pemBodyOk(label: string, body: string): boolean {
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(body) || body.length < 100) return false;
-  let bytes: Buffer;
-  try {
-    bytes = Buffer.from(body, 'base64');
-  } catch {
-    return false;
-  }
-  if (label === 'OPENSSH ') return bytes.subarray(0, 15).toString('latin1') === 'openssh-key-v1\0';
-  // PKCS#1・PKCS#8・SEC1（EC）・DSA は、どれも ASN.1 の SEQUENCE（0x30）で始まる
-  return bytes[0] === 0x30 && bytes.length >= 64;
 }
 
 /** 文字列の中の秘密鍵を探す（JSON の "\n" のような書き方も読む）。最初に見つかった1つだけを返す */
@@ -63,23 +54,33 @@ export function findPrivateKey(text: string, onBody?: (body: string) => void): P
   const pem = /-----BEGIN ((?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?)PRIVATE KEY-----([\s\S]*?)-----END \1PRIVATE KEY-----/.exec(normalized);
   if (pem) {
     const label = pem[1] ?? '';
-    const lines = (pem[2] ?? '').split('\n').map((l) => l.replace(/["'`+,\\\s]/g, ''));
+    const lines = (pem[2] ?? '').split('\n').map(cleanPemLine);
     // 古い暗号化 PEM（Proc-Type: 4,ENCRYPTED）の見出し行は除く
-    const encrypted = label === 'ENCRYPTED ' || lines.some((l) => /^Proc-Type:4,ENCRYPTED/i.test(l));
+    // 行を整えるとカンマが消えるので、Proc-Type の見出しはカンマの有無を問わない
+    const encrypted = label === 'ENCRYPTED ' || lines.some((l) => /^Proc-Type:4,?ENCRYPTED/i.test(l));
     const body = lines.filter((l) => !l.includes(':')).join('');
     const kind: PrivateKeyKind = label === 'OPENSSH ' ? 'openssh' : 'pem';
-    // テスト用の語・本体の形が崩れたものは、テスト用（ダミー）とする
-    const real = !TEST_WORDS.test(body) && pemBodyOk(label, body);
-    if (real) onBody?.(body);
-    return { kind, value: real ? 'real-like' : 'test-like', encrypted, line: lineAt(text, text.indexOf('-----BEGIN') >= 0 ? text.indexOf('-----BEGIN') : 0) };
+    // 古い形式の暗号化 PEM（Proc-Type）は、本体が暗号文なので ASN.1 の形にはならない
+    const judged = classifyKeyBody(encrypted && label !== 'ENCRYPTED ' && label !== 'OPENSSH ' ? 'legacy-encrypted' : label, body);
+    // 同じ鍵かどうかの比較（指紋）は、ダミー以外で行う（判断できない鍵も、履歴の確認の対象にする）
+    if (judged.value !== 'test-like') onBody?.(body);
+    return {
+      kind,
+      value: judged.value,
+      encrypted: encrypted || judged.encrypted === true,
+      line: lineAt(text, text.indexOf('-----BEGIN') >= 0 ? text.indexOf('-----BEGIN') : 0),
+    };
   }
 
   const pgp = /-----BEGIN PGP PRIVATE KEY BLOCK-----([\s\S]*?)-----END PGP PRIVATE KEY BLOCK-----/.exec(normalized);
   if (pgp) {
-    const body = (pgp[1] ?? '').split('\n').filter((l) => !l.includes(':')).join('').replace(/\s/g, '');
-    const real = !TEST_WORDS.test(body) && /^[A-Za-z0-9+/=]+$/.test(body) && body.length >= 200;
-    if (real) onBody?.(body);
-    return { kind: 'pgp', value: real ? 'real-like' : 'test-like', encrypted: false, line: lineAt(text, text.indexOf('-----BEGIN PGP')) };
+    const lines = (pgp[1] ?? '').split('\n').map((l) => l.trim()).filter((l) => l && !l.includes(':'));
+    // ASCII armor の最後の「=」で始まる行は、チェックサム（CRC-24）
+    const crcLine = lines.length > 1 && /^=[A-Za-z0-9+/]{4}$/.test(lines[lines.length - 1] ?? '') ? lines.pop() : undefined;
+    const body = lines.join('');
+    const judged = classifyKeyBody('pgp', body, crcLine?.slice(1));
+    if (judged.value !== 'test-like') onBody?.(body);
+    return { kind: 'pgp', value: judged.value, encrypted: false, line: lineAt(text, text.indexOf('-----BEGIN PGP')) };
   }
 
   // PuTTY の鍵（.ppk）：Private-Lines の後に秘密鍵の本体がある。Encryption が none 以外なら暗号化されている
@@ -87,9 +88,9 @@ export function findPrivateKey(text: string, onBody?: (body: string) => void): P
   if (putty && /^Private-Lines:\s*\d+/m.test(text)) {
     const enc = /^Encryption:\s*(\S+)/m.exec(text)?.[1] ?? 'none';
     const priv = /^Private-Lines:\s*\d+\r?\n([\s\S]*?)(?:\r?\n[A-Za-z-]+:|$)/m.exec(text)?.[1]?.replace(/\s/g, '') ?? '';
-    const real = !TEST_WORDS.test(priv) && /^[A-Za-z0-9+/=]+$/.test(priv) && priv.length >= 40;
-    if (real) onBody?.(priv);
-    return { kind: 'putty', value: real ? 'real-like' : 'test-like', encrypted: enc !== 'none', line: lineAt(text, putty.index) };
+    const judged = classifyKeyBody('putty', priv);
+    if (judged.value !== 'test-like') onBody?.(priv);
+    return { kind: 'putty', value: judged.value, encrypted: enc !== 'none', line: lineAt(text, putty.index) };
   }
   return undefined;
 }

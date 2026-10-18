@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,7 +32,8 @@ function rand(length: number, charset: 'b64' | 'hex' | 'alnum' = 'b64'): string 
 }
 const jwt = (payload: object) =>
   `${Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.${rand(43)}`;
-const pem = () => `-----BEGIN RSA PRIVATE KEY-----\\n${randomBytes(600).toString('base64').match(/.{1,64}/g)?.join('\\n')}\\n-----END RSA PRIVATE KEY-----`;
+// 鍵は構造（ASN.1）で判定するので、本物の形の鍵（PKCS#1）をテストのたびに作る。.env の書き方（\n で改行）にする
+const pem = () => generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs1', format: 'pem' }).toString().trim().replace(/\r?\n/g, '\\n');
 
 /** 本物の形式に見える値（乱数） */
 const REAL = {

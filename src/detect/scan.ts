@@ -87,8 +87,8 @@ export interface PrivateKeyLocation {
   file: string;
   line: number;
   kind: PrivateKeyKind;
-  /** real-like：本物の形／test-like：テスト用・形が崩れている（数えない） */
-  value: 'real-like' | 'test-like';
+  /** real-like：本物の鍵の構造／test-like：はっきりしたダミー（数えない）／uncertain：本物か判断できない（確認をおすすめ） */
+  value: 'real-like' | 'test-like' | 'uncertain';
   /** パスフレーズで暗号化されている */
   encrypted: boolean;
   git: GitState;
@@ -556,7 +556,7 @@ export function scanProject(inputPath: string, limits: ScanLimits = DEFAULT_LIMI
     if (pub) loc.publicDir = pub;
     return loc;
   });
-  for (const k of privateKeys) if (k.value === 'real-like') add('credentials', k.file);
+  for (const k of privateKeys) if (k.value !== 'test-like') add('credentials', k.file);
   const publicExposures: PublicExposure[] = exposures.slice(0, 200).map((x) => ({ ...x, git: gitStateOf(x.file) }));
   for (const x of publicExposures) add('credentials', x.file);
 

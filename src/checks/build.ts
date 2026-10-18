@@ -68,6 +68,7 @@ const VALUE_LABEL: Record<SecretValueReason, string> = {
   'token-format': '本物の形式に見える',
   'url-credentials': 'パスワードが入った接続先',
   'private-key': '本物の秘密鍵に見える',
+  'key-unverified': '秘密鍵の形だが、本物か確認できない',
   'test-word': 'テスト用の値（TEST・DUMMY などの語を含む）',
   'too-short': 'テスト用の値（本物より短い）',
   'low-randomness': 'テスト用の値（ランダムな文字列ではない）',
@@ -122,38 +123,43 @@ const KEY_KIND_LABEL: Record<PrivateKeyLocation['kind'], string> = {
 };
 
 /**
- * 秘密鍵の重大度。中身が本物の形の鍵だけを数える（テスト用・形が崩れた鍵は数えない）。
+ * 秘密鍵の重大度。はっきりしたダミー（見本の文字・同じ値の繰り返し）だけを数えない。
  * Git の扱いは秘密情報と同じ：管理されている・除外されていない → 🔴、Git なし → 🟠、Git の対象外 → 数えない。
- * パスフレーズで暗号化された鍵は、それだけでは使えないので 🟠 にとどめる。公開フォルダの中は、公開フォルダの項目で扱う。
+ * パスフレーズで暗号化された鍵・本物か判断できない鍵は、🟠 にとどめる（安全とは扱わない）。公開フォルダの中は、公開フォルダの項目で扱う。
  */
 export function privateKeyRisk(k: PrivateKeyLocation): SecretRisk {
-  if (k.value !== 'real-like') return 'info';
-  if (k.publicDir) return k.encrypted ? 'warn' : 'danger';
+  if (k.value === 'test-like') return 'info';
+  const capped = k.encrypted || k.value === 'uncertain';
+  if (k.publicDir) return capped ? 'warn' : 'danger';
   let risk: SecretRisk;
   if (k.git === 'tracked' || k.git === 'untracked' || k.git === 'not-ignored') risk = 'danger';
   else if (k.git === 'no-git') risk = 'warn';
   else risk = 'info';
-  if (risk === 'danger' && k.encrypted) risk = 'warn';
+  if (risk === 'danger' && capped) risk = 'warn';
   return risk;
 }
 
+/** 鍵の状態の補足（暗号化・本物か判断できない） */
+function keyStateText(k: PrivateKeyLocation): string {
+  return (k.encrypted ? '・パスフレーズで暗号化されている' : '') + (k.value === 'uncertain' ? '・秘密鍵の形だが、本物か確認できない' : '');
+}
+
 function keyLocationText(k: PrivateKeyLocation): string {
-  const enc = k.encrypted ? '・パスフレーズで暗号化されている' : '';
-  return `${k.file}:${k.line}（${KEY_KIND_LABEL[k.kind]}${enc}・${GIT_LABEL[k.git]}）`;
+  return `${k.file}:${k.line}（${KEY_KIND_LABEL[k.kind]}${keyStateText(k)}・${GIT_LABEL[k.git]}）`;
 }
 
 function privateKeyChecks(scan: ScanResult): CheckItem[] {
   const items: CheckItem[] = [];
   // GitHub App の秘密鍵など、秘密情報の定義（名前つき）で見つけた場所は重ねて出さない
-  const named = new Set(scan.secretNames.filter((h) => h.value?.reason === 'private-key' || h.defId === 'github-app-private-key').map((h) => h.file));
+  const named = new Set(scan.secretNames.filter((h) => h.value?.reason === 'private-key' || h.value?.reason === 'key-unverified' || h.defId === 'github-app-private-key').map((h) => h.file));
   const keys = scan.privateKeys.filter((k) => !k.publicDir && !named.has(k.file));
   const danger = keys.filter((k) => privateKeyRisk(k) === 'danger');
   const warn = keys.filter((k) => privateKeyRisk(k) === 'warn');
-  const ignored = keys.filter((k) => k.value === 'real-like' && privateKeyRisk(k) === 'info');
+  const ignored = keys.filter((k) => k.value !== 'test-like' && privateKeyRisk(k) === 'info');
   const fakes = keys.filter((k) => k.value === 'test-like');
   const details: NonNullable<CheckItem['details']> = [];
   if (ignored.length) details.push({ summary: `Git の対象外（.gitignore）の秘密鍵 ${ignored.length}件（公開の問題としては数えていません）`, items: ignored.map((k) => `${k.file}:${k.line}`) });
-  if (fakes.length) details.push({ summary: `テスト用・形の崩れた鍵と判断した場所 ${fakes.length}件`, items: fakes.map((k) => `${k.file}:${k.line}`) });
+  if (fakes.length) details.push({ summary: `ダミー（見本の文字・同じ値の繰り返し）と判断した鍵 ${fakes.length}件`, items: fakes.map((k) => `${k.file}:${k.line}`) });
   if (danger.length > 0) {
     items.push({
       id: 'private-key-danger',
@@ -173,7 +179,7 @@ function privateKeyChecks(scan: ScanResult): CheckItem[] {
       status: 'warn',
       title: `秘密鍵が${warn.length}か所にあります。公開されないか確認してください`,
       body:
-        'ファイルの中身から、秘密鍵だと確認できました。Git で管理していないフォルダにあるか、パスフレーズで暗号化された鍵です。' +
+        'ファイルの中身から、秘密鍵の形だと分かりました。Git で管理していないフォルダにある鍵、パスフレーズで暗号化された鍵、または秘密鍵の形だが本物かどうかを確認できなかった鍵です（確認できない鍵も、安全とは扱っていません）。' +
         '共有フォルダ・クラウドの同期フォルダ・公開するファイルに含まれないかを確認し、必要なら .gitignore に追加してください。鍵の中身はこの画面に表示していません。',
       points: warn.map(keyLocationText),
       ...(details.length ? { details } : {}),
@@ -201,14 +207,14 @@ const EXPOSURE_LABEL: Record<PublicExposure['kind'], string> = {
 };
 
 function publicFolderChecks(scan: ScanResult): CheckItem[] {
-  const keys = scan.privateKeys.filter((k) => k.publicDir && k.value === 'real-like');
+  const keys = scan.privateKeys.filter((k) => k.publicDir && k.value !== 'test-like');
   const danger = [
     ...scan.publicExposures.filter((x) => x.kind !== 'db-sql').map((x) => `${x.file}（${EXPOSURE_LABEL[x.kind]}・公開フォルダ ${x.publicDir}/ の中）`),
     ...keys.filter((k) => privateKeyRisk(k) === 'danger').map((k) => `${k.file}:${k.line}（${KEY_KIND_LABEL[k.kind]}・公開フォルダ ${k.publicDir}/ の中）`),
   ];
   const warn = [
     ...scan.publicExposures.filter((x) => x.kind === 'db-sql').map((x) => `${x.file}（${EXPOSURE_LABEL[x.kind]}・公開フォルダ ${x.publicDir}/ の中）`),
-    ...keys.filter((k) => privateKeyRisk(k) === 'warn').map((k) => `${k.file}:${k.line}（${KEY_KIND_LABEL[k.kind]}・パスフレーズで暗号化されている・公開フォルダ ${k.publicDir}/ の中）`),
+    ...keys.filter((k) => privateKeyRisk(k) === 'warn').map((k) => `${k.file}:${k.line}（${KEY_KIND_LABEL[k.kind]}${keyStateText(k)}・公開フォルダ ${k.publicDir}/ の中）`),
   ];
   const items: CheckItem[] = [];
   const common =

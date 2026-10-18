@@ -29,6 +29,23 @@ function rand(length: number, charset: 'alnum' | 'b64std' = 'alnum'): string {
   }
 }
 
+/** OpenSSH の秘密鍵の形（openssh-key-v1：暗号の名前・鍵の導出・鍵の数・公開鍵・秘密の部分）。中身は乱数 */
+function opensshKey(): string {
+  const str = (b: Buffer | string) => {
+    const v = typeof b === 'string' ? Buffer.from(b, 'latin1') : b;
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(v.length);
+    return Buffer.concat([len, v]);
+  };
+  const one = Buffer.alloc(4);
+  one.writeUInt32BE(1);
+  const check = randomBytes(4);
+  const priv = Buffer.concat([check, check, str('ssh-ed25519'), str(randomBytes(32)), str(randomBytes(64)), str('key'), Buffer.from([1, 2, 3])]);
+  const pub = Buffer.concat([str('ssh-ed25519'), str(randomBytes(32))]);
+  const blob = Buffer.concat([Buffer.from('openssh-key-v1\0', 'latin1'), str('none'), str('none'), str(''), one, str(pub), str(priv)]);
+  return `-----BEGIN OPENSSH PRIVATE KEY-----\n${blob.toString('base64').match(/.{1,70}/g)?.join('\n')}\n-----END OPENSSH PRIVATE KEY-----\n`;
+}
+
 const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const ec = generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const KEYS = {
@@ -36,7 +53,7 @@ const KEYS = {
   pkcs1: rsa.privateKey.export({ type: 'pkcs1', format: 'pem' }).toString(),
   ec: ec.privateKey.export({ type: 'sec1', format: 'pem' }).toString(),
   encrypted: rsa.privateKey.export({ type: 'pkcs8', format: 'pem', cipher: 'aes-256-cbc', passphrase: 'pass-phrase-for-unit' }).toString(),
-  openssh: `-----BEGIN OPENSSH PRIVATE KEY-----\n${Buffer.concat([Buffer.from('openssh-key-v1\0', 'latin1'), randomBytes(300)]).toString('base64').match(/.{1,70}/g)?.join('\n')}\n-----END OPENSSH PRIVATE KEY-----\n`,
+  openssh: opensshKey(),
   publicKey: rsa.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
 };
 const CERT = `-----BEGIN CERTIFICATE-----\n${randomBytes(600).toString('base64').match(/.{1,64}/g)?.join('\n')}\n-----END CERTIFICATE-----\n`;

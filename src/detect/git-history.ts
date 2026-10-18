@@ -284,7 +284,8 @@ export function scanGitHistory(
         if (place || isKeyFileCandidate(name)) {
           let keyFp: string | undefined;
           const key = findPrivateKey(text, (b) => (keyFp = hmac(`key\0${b}`)));
-          if (key && key.value === 'real-like' && keyFp) add(keyFp, { kind: 'private-key', keyKind: key.kind, encrypted: key.encrypted, value: 'real-like', file });
+          // ダミー以外は数える（本物か判断できない鍵は、安全とは扱わず 🟠 にする）
+          if (key && key.value !== 'test-like' && keyFp) add(keyFp, { kind: 'private-key', keyKind: key.kind, encrypted: key.encrypted, value: key.value, file });
         }
         if (Date.now() > deadline) {
           truncated = true;
