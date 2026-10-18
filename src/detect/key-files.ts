@@ -20,6 +20,8 @@ export interface PrivateKeyMatch {
   /** パスフレーズで暗号化されている */
   encrypted: boolean;
   line: number;
+  /** 「-----BEGIN」などの見出しの位置（ファイルの中の文字の位置。同じ行の複数の鍵を見分けるため） */
+  index: number;
   /** 鍵を組み立てる式に、復元できない部分（変数・呼び出し）がある */
   unresolved?: boolean;
 }
@@ -35,8 +37,6 @@ function lineAt(text: string, index: number): number {
 
 /** 1つのファイルから取り出した秘密鍵の候補（本体は結果に入れない。指紋づくり・名前つきの検出との突き合わせだけに使う） */
 export interface PrivateKeyCandidate extends PrivateKeyMatch {
-  /** 「-----BEGIN」の位置（ファイルの中の文字の位置） */
-  index: number;
   /** 復元できた鍵の本体（外へ出さない） */
   body: string;
 }
@@ -49,21 +49,23 @@ const MAX_KEYS_PER_FILE = 20;
  * 構造が正しく本物と分かればそのまま。そうでなくても、引用符の中に鍵の本体らしい断片（base64・十分な長さ・ランダム）が
  * 書かれていれば、本物の鍵の一部の可能性があるので、ダミーとは扱わず uncertain（確認をおすすめ）にする。
  * 断片が見本の文字（base64 として読めない）なら、ダミーのまま。断片がない（見出しと変数だけ）なら、鍵をコードに書いた証拠がないので数えない。
+ * ただし、同じファイルの定数を上限まで読んでも読み切れなかった（limited）ときは、本体がその先にある可能性があるので、断片がなくても uncertain にする。
  */
-function judgePartial(value: KeyBodyValue, body: string): KeyBodyValue {
+function judgePartial(value: KeyBodyValue, body: string, limited: boolean): KeyBodyValue {
   if (value !== 'test-like') return value;
+  if (limited && /^[A-Za-z0-9+/=]*$/.test(body)) return 'uncertain';
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(body) || body.length < 24) return value;
   return new Set(body).size >= 12 ? 'uncertain' : value;
 }
 
 /** PEM の本体の行から、判定・暗号化の有無を決める */
-function judgePem(label: string, lines: string[], partial: boolean): { value: KeyBodyValue; encrypted: boolean; body: string } {
+function judgePem(label: string, lines: string[], partial: boolean, limited = false): { value: KeyBodyValue; encrypted: boolean; body: string } {
   // 古い暗号化 PEM（Proc-Type: 4,ENCRYPTED）の見出し行は除く（カンマの有無は問わない）
   const encrypted = label === 'ENCRYPTED ' || lines.some((l) => /^Proc-Type:4,?ENCRYPTED/i.test(l));
   const body = lines.filter((l) => !l.includes(':')).join('');
   // 古い形式の暗号化 PEM（Proc-Type）は、本体が暗号文なので ASN.1 の形にはならない
   const judged = classifyKeyBody(encrypted && label !== 'ENCRYPTED ' && label !== 'OPENSSH ' ? 'legacy-encrypted' : label, body);
-  const value = partial ? judgePartial(judged.value, body) : judged.value;
+  const value = partial ? judgePartial(judged.value, body, limited) : judged.value;
   return { value, encrypted: encrypted || judged.encrypted === true, body };
 }
 
@@ -81,13 +83,15 @@ function pemCandidates(text: string): PrivateKeyCandidate[] {
     let lines: string[] | undefined;
     let partial = false;
     let unresolved = false;
+    let limited = false;
     if (quote !== undefined) {
       // コードの文字列リテラルの中：式を実行せずに読み、連結・同じファイルの定数を復元する
       consts ??= new Constants(text);
       const expr = readKeyExpression(text, quote, consts, new RegExp(endMark));
       const begin = expr.value.indexOf(m[0]);
       const end = expr.value.indexOf(endMark, begin + m[0].length);
-      unresolved = expr.unresolved.length > 0;
+      unresolved = expr.unresolved.length > 0 || expr.limited;
+      limited = expr.limited;
       if (begin < 0) continue;
       if (end < 0 && !unresolved) continue; // 終わりの印がなく、復元できない部分もない（鍵ではない文字列）
       lines = expr.value.slice(begin + m[0].length, end < 0 ? undefined : end).split('\n').map((l) => l.replace(/\s/g, ''));
@@ -104,7 +108,7 @@ function pemCandidates(text: string): PrivateKeyCandidate[] {
         .map((l) => l.replace(/[\s\\]/g, ''));
       searchFrom = end + endMark.length;
     }
-    const judged = judgePem(label, lines, partial);
+    const judged = judgePem(label, lines, partial, limited);
     const candidate: PrivateKeyCandidate = {
       kind: label === 'OPENSSH ' ? 'openssh' : 'pem',
       value: judged.value,
@@ -170,7 +174,7 @@ export function findPrivateKeyCandidates(text: string): PrivateKeyCandidate[] {
 
 /** 結果に入れる形（本体・位置を落とす） */
 function toMatch(c: PrivateKeyCandidate): PrivateKeyMatch {
-  const m: PrivateKeyMatch = { kind: c.kind, value: c.value, encrypted: c.encrypted, line: c.line };
+  const m: PrivateKeyMatch = { kind: c.kind, value: c.value, encrypted: c.encrypted, line: c.line, index: c.index };
   if (c.unresolved) m.unresolved = true;
   return m;
 }

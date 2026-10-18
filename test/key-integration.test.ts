@@ -145,7 +145,8 @@ describe('秘密鍵：実際のファイル・Git で、検出が後の段階で
 
   it('7. 1つのファイルに複数の鍵 → どれも消えず、重ならない', { skip }, () => {
     const named = namedMultiline(realBody());
-    const generic = `\nexport const DEPLOY_KEY = "${BEGIN}${NL}" + "${half(realBody())[0]}" +\n  "${half(realBody())[1]}" + "${NL}${END}";\n`;
+    const [d1, d2] = half(realBody());
+    const generic = `\nexport const DEPLOY_KEY = "${BEGIN}${NL}" + "${d1}" +\n  "${d2}" + "${NL}${END}";\n`;
     const fromParts = fromConstants(realBody(), 'SIGNING_KEY').replace(/PART/g, 'SIGN');
     const code = named + generic + fromParts;
     const root = trackedProject({ 'src/keys.ts': code, 'keys/two.pem': pemFile(realBody()) + pemFile(realBody()) });
@@ -195,6 +196,42 @@ describe('秘密鍵：実際のファイル・Git で、検出が後の段階で
     for (const file of ['src/sample.ts', 'src/dots.ts', 'src/env.ts', 'src/envconst.ts']) {
       assert.deepEqual(placesOf(list, file).map((p) => p.id), [], file);
     }
+  });
+
+  it('12. 同じ行に、暗号化した鍵と名前つきの鍵 → それぞれ 🟠・🔴 で、消えず重ならない（現在のファイル・Git の履歴）', { skip }, () => {
+    const encrypted = generateKeyPairSync('rsa', { modulusLength: 2048 })
+      .privateKey.export({ type: 'pkcs8', format: 'pem', cipher: 'aes-256-cbc', passphrase: 'koukai-check-test' })
+      .toString()
+      .split('\n')
+      .filter((l) => l && !l.startsWith('-----'))
+      .join('');
+    const code = `const A = "-----BEGIN ENCRYPTED PRIVATE KEY-----${NL}${encrypted}${NL}-----END ENCRYPTED PRIVATE KEY-----"; export const GITHUB_APP_PRIVATE_KEY = "${BEGIN}${NL}${realBody()}${NL}${END}";\n`;
+    const root = trackedProject({ 'src/same-line.ts': code });
+    const places = placesOf(buildChecks(scanProject(root)), 'src/same-line.ts');
+    assert.deepEqual(places.map((p) => p.status).sort(), ['danger', 'warn'], places.map((p) => p.id).join(' / '));
+    assert.ok(places.some((p) => p.id === 'private-key-warn' && p.point.includes('暗号化')), '暗号化した鍵は 🟠');
+    assert.ok(places.some((p) => p.id === 'secret-github-app-private-key-danger'), '名前つきの鍵は 🔴');
+
+    git(root, 'commit', '-q', '-m', 'add');
+    git(root, 'rm', '-q', '--', 'src/same-line.ts');
+    git(root, 'commit', '-q', '-m', 'remove');
+    const findings = scanProject(root).gitHistory.findings.filter((f) => f.file === 'src/same-line.ts');
+    assert.deepEqual(findings.map((f) => (f.kind === 'secret' ? f.defId : `key:${f.encrypted ? 'encrypted' : 'plain'}`)).sort(), ['github-app-private-key', 'key:encrypted']);
+  });
+
+  it('13. 同じファイルの定数を何段もたどる鍵 → ふつうの深さは 🔴、上限を超えても 🟠 以上（ダミー扱いしない）', { skip }, () => {
+    /** P0 → P1 → … → P{depth}（鍵の本体） */
+    const chain = (depth: number) => {
+      const lines = [`const P${depth} = "${realBody()}";`];
+      for (let i = depth - 1; i >= 0; i--) lines.push(`const P${i} = P${i + 1};`);
+      return `${lines.join('\n')}\nexport const KEY = "${BEGIN}${NL}" + P0 + "${NL}${END}";\n`;
+    };
+    const root = trackedProject({ 'src/depth5.ts': chain(5), 'src/depth40.ts': chain(40) });
+    const list = buildChecks(scanProject(root));
+    assert.deepEqual(placesOf(list, 'src/depth5.ts').map((p) => p.status), ['danger'], 'P0 → … → P5');
+    const deep = placesOf(list, 'src/depth40.ts');
+    assert.equal(deep.length, 1, '上限を超える深さでも消えない');
+    assert.match(deep[0]?.point ?? '', /復元できない/);
   });
 
   it('11. 鍵の値は、結果・AI への修正の依頼文・HTML に入らない', { skip }, () => {

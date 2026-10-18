@@ -151,7 +151,7 @@ function keyStateText(k: PrivateKeyLocation): string {
 const RISK_RANK: Record<SecretRisk, number> = { danger: 2, warn: 1, info: 0 };
 
 /**
- * 名前つきの秘密情報（GitHub App の秘密鍵など）と、秘密鍵の項目が同じ鍵（同じファイルの同じ見出しの行）を指しているときだけ、重ねて出さない。
+ * 名前つきの秘密情報（GitHub App の秘密鍵など）と、秘密鍵の項目が同じ鍵（同じファイルの同じ見出しの位置）を指しているときだけ、重ねて出さない。
  * 重いほうを残す（同じなら名前つき。ただし復元できない部分がある鍵は、その補足を出せる秘密鍵の項目を残す）。
  * ファイル名・変数名があるだけでは、秘密鍵の項目を消さない。
  */
@@ -159,8 +159,8 @@ function keyDuplicates(scan: ScanResult): { keys: Set<PrivateKeyLocation>; named
   const keys = new Set<PrivateKeyLocation>();
   const named = new Set<SecretNameLocation>();
   for (const h of scan.secretNames) {
-    if (h.keyLine === undefined || !h.value) continue;
-    const k = scan.privateKeys.find((p) => !p.publicDir && p.file === h.file && p.line === h.keyLine);
+    if (h.keyIndex === undefined || !h.value) continue;
+    const k = scan.privateKeys.find((p) => !p.publicDir && p.file === h.file && p.index === h.keyIndex);
     if (!k || keys.has(k)) continue;
     const diff = RISK_RANK[secretRisk(h)] - RISK_RANK[privateKeyRisk(k)];
     if (diff > 0 || (diff === 0 && !k.unresolved)) keys.add(k);

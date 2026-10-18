@@ -4,6 +4,7 @@
 //             括弧・同じファイルの中で文字列だけを代入した定数（const A = "…" / A = "…"）
 // 読まないもの：関数の呼び出しの結果・ほかのファイルから読み込んだ値・計算。eval やコードの実行はしない。
 // 読めなかったものは、名前だけを unresolved に残す（「復元できない部分がある」という事実を捨てない）。
+// 定数のたどりが上限（深さ・長さ）で打ち切られたときは limited にする（読み切れなかったことを、ダミーの根拠にしない）。
 // 環境変数の参照（ENV_ROOT の形）は、値をコードに書かない正しい書き方なので、別に数える（envRefs）。
 
 export interface StringExpr {
@@ -13,6 +14,8 @@ export interface StringExpr {
   unresolved: string[];
   /** 環境変数の参照の数 */
   envRefs: number;
+  /** 上限（定数をたどる深さ・式の長さ）で読み切れなかった */
+  limited: boolean;
   /** 式の終わりの位置 */
   end: number;
 }
@@ -20,7 +23,7 @@ export interface StringExpr {
 const QUOTES = new Set(['"', "'", '`']);
 const ENV_ROOT = /^(?:process\.env|import\.meta\.env|os\.environ|os\.getenv|Deno\.env|System\.getenv|ENV)(?:$|[.[(])/;
 const IDENT_START = /[A-Za-z_$]/;
-const MAX_DEPTH = 4;
+const MAX_DEPTH = 16;
 const MAX_SPAN = 20000;
 
 /** 空白・改行・コメントを飛ばす */
@@ -62,7 +65,8 @@ export class Constants {
   constructor(private readonly text: string) {}
 
   resolve(name: string, depth: number): StringExpr | undefined {
-    if (depth > MAX_DEPTH || !/^[A-Za-z_$][\w$]*$/.test(name)) return undefined;
+    if (!/^[A-Za-z_$][\w$]*$/.test(name)) return undefined;
+    if (depth > MAX_DEPTH) return { value: '', unresolved: [name], envRefs: 0, end: 0, limited: true };
     if (this.cache.has(name)) return this.cache.get(name) ?? undefined;
     this.cache.set(name, null); // 自分自身を参照する定義で止まらないように
     const decl = new RegExp(`(?:^|[\\s;{(,])(?:(?:export\\s+)?(?:const|let|var)\\s+)?${name.replace(/\$/g, '\\$')}\\s*(?::[^=\\n;]{1,60})?=(?![=>])`, 'm').exec(this.text);
@@ -81,6 +85,7 @@ function readLiteral(t: string, i: number, consts: Constants, depth: number): St
   let out = '';
   const unresolved: string[] = [];
   let envRefs = 0;
+  let limited = false;
   let j = i + 1;
   while (j < t.length && j - i < MAX_SPAN) {
     const c = t[j] ?? '';
@@ -98,13 +103,14 @@ function readLiteral(t: string, i: number, consts: Constants, depth: number): St
       j += 2;
       continue;
     }
-    if (c === quote) return { value: out, unresolved, envRefs, end: j + 1 };
+    if (c === quote) return { value: out, unresolved, envRefs, limited, end: j + 1 };
     if (quote === '`' && c === '$' && t[j + 1] === '{') {
       const inner = readConcat(t, skipSpace(t, j + 2), consts, depth);
       if (inner) {
         out += inner.value;
         unresolved.push(...inner.unresolved);
         envRefs += inner.envRefs;
+        limited ||= inner.limited;
       }
       const close = t.indexOf('}', inner ? inner.end : j + 2);
       j = close < 0 ? t.length : close + 1;
@@ -113,7 +119,7 @@ function readLiteral(t: string, i: number, consts: Constants, depth: number): St
     out += c;
     j++;
   }
-  return { value: out, unresolved, envRefs, end: j };
+  return { value: out, unresolved, envRefs, limited: limited || j - i >= MAX_SPAN, end: j };
 }
 
 /** 式の1つの要素（文字列リテラル・括弧・変数や呼び出し） */
@@ -122,7 +128,7 @@ function readOperand(t: string, i: number, consts: Constants, depth: number): St
   if (QUOTES.has(c)) return readLiteral(t, i, consts, depth);
   if (c === '(') {
     const inner = readConcat(t, skipSpace(t, i + 1), consts, depth);
-    return { value: inner?.value ?? '', unresolved: inner?.unresolved ?? [], envRefs: inner?.envRefs ?? 0, end: skipBalanced(t, i) };
+    return { value: inner?.value ?? '', unresolved: inner?.unresolved ?? [], envRefs: inner?.envRefs ?? 0, limited: inner?.limited ?? false, end: skipBalanced(t, i) };
   }
   if (!IDENT_START.test(c)) return undefined;
   // 変数名・プロパティ（a.b・a["b"]）・呼び出し（f(…)）をまとめて1つの要素として読む（中の文字列は値にしない）
@@ -156,12 +162,12 @@ function readOperand(t: string, i: number, consts: Constants, depth: number): St
     call = true;
     j = skipBalanced(t, k);
   }
-  if (ENV_ROOT.test(chain)) return { value: '', unresolved: [], envRefs: 1, end: j };
+  if (ENV_ROOT.test(chain)) return { value: '', unresolved: [], envRefs: 1, limited: false, end: j };
   if (!call && /^[A-Za-z_$][\w$]*$/.test(chain)) {
     const v = consts.resolve(chain, depth);
-    if (v) return { value: v.value, unresolved: v.unresolved, envRefs: v.envRefs, end: j };
+    if (v) return { value: v.value, unresolved: v.unresolved, envRefs: v.envRefs, limited: v.limited, end: j };
   }
-  return { value: '', unresolved: [call ? `${chain}()` : chain], envRefs: 0, end: j };
+  return { value: '', unresolved: [call ? `${chain}()` : chain], envRefs: 0, limited: false, end: j };
 }
 
 /** + でつながった式を読む（式の終わり：; ) } など、+ 以外の記号・次の文） */
@@ -177,6 +183,7 @@ export function readConcat(t: string, i: number, consts: Constants, depth = 0): 
     out.value += next.value;
     out.unresolved.push(...next.unresolved);
     out.envRefs += next.envRefs;
+    out.limited ||= next.limited;
     out.end = next.end;
   }
   return out;
@@ -187,7 +194,7 @@ export function readConcat(t: string, i: number, consts: Constants, depth = 0): 
  * 配列の要素（"-----BEGIN…", "MIIE…", …）や、改行をはさんだ連結も読む。
  */
 export function readKeyExpression(t: string, quoteIndex: number, consts: Constants, stop: RegExp): StringExpr {
-  const out: StringExpr = { value: '', unresolved: [], envRefs: 0, end: quoteIndex };
+  const out: StringExpr = { value: '', unresolved: [], envRefs: 0, limited: false, end: quoteIndex };
   let i = quoteIndex;
   let needSeparator = false;
   while (i < t.length && i - quoteIndex < MAX_SPAN) {
@@ -209,11 +216,13 @@ export function readKeyExpression(t: string, quoteIndex: number, consts: Constan
     out.value += op.value;
     out.unresolved.push(...op.unresolved);
     out.envRefs += op.envRefs;
+    out.limited ||= op.limited;
     out.end = op.end;
     i = op.end;
     needSeparator = true;
     if (stop.test(out.value)) break;
   }
+  if (i - quoteIndex >= MAX_SPAN) out.limited = true;
   return out;
 }
 

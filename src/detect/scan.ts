@@ -91,6 +91,8 @@ export interface PrivateKeyLocation {
   value: 'real-like' | 'test-like' | 'uncertain';
   /** パスフレーズで暗号化されている */
   encrypted: boolean;
+  /** 鍵の見出しの位置（ファイルの中の文字の位置。名前つきの秘密情報と同じ鍵かを見分けるため） */
+  index?: number;
   /** 鍵を組み立てる式に、復元できない部分（変数・呼び出し）がある */
   unresolved?: boolean;
   git: GitState;

@@ -67,8 +67,8 @@ export interface SecretNameHit {
   value?: SecretValue;
   /** 公開してよいキーの変数名（SUPABASE_ANON_KEY など）で見つけたか */
   publicName?: boolean;
-  /** 秘密鍵を値として読んだとき、その鍵の見出しの行（秘密鍵の項目と同じ鍵かを突き合わせるため） */
-  keyLine?: number;
+  /** 秘密鍵を値として読んだとき、その鍵の見出しの位置（秘密鍵の項目と同じ鍵かを突き合わせるため。同じ行に複数の鍵があっても見分ける） */
+  keyIndex?: number;
   /** 同じファイルに、ローカルの Supabase の URL（localhost / 127.0.0.1）が書かれているか（ローカル開発用の判断の根拠の1つ） */
   localHint?: boolean;
 }
@@ -416,7 +416,7 @@ function findInTextInner(text: string, file: string, place: 'config' | 'source' 
           : undefined;
         const found = key ? { usage: 'literal' as const, value: key.body } : valueAfterName(after, def);
         const hit: SecretNameHit = { defId: def.id, as: prefix + n, file, line: lineOf(text, index), place, usage: found.usage, localHint };
-        if (key) hit.keyLine = key.line;
+        if (key) hit.keyIndex = key.index;
         if (found.value !== undefined) {
           hit.value = key ? keyValueOf(key) : classifySecretValue(def, found.value);
           values.set(hit, found.value);
