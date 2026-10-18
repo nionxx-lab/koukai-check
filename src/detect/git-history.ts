@@ -19,7 +19,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { isEnvExampleName, isEnvFileName } from './env.js';
-import { findPrivateKey, isKeyFileCandidate, type PrivateKeyKind } from './key-files.js';
+import { findPrivateKeyCandidates, isKeyFileCandidate, type PrivateKeyKind } from './key-files.js';
 import { findInEnv, findInText, textPlaceOf, type SecretNameHit } from './secret-names.js';
 
 export interface HistoryLimits {
@@ -273,19 +273,23 @@ export function scanGitHistory(
             groups.set(fp, { finding, blob: c.sha, files: new Set([file]), count: 1 });
           }
         };
+        // 名前つきの秘密情報として数えた鍵の見出しの行（同じ鍵を、秘密鍵としても重ねて数えない）
+        const namedKeyLines = new Set<number>();
         const onValue = (hit: SecretNameHit, value: string) => {
           const kind = hit.value?.kind;
           if (kind !== 'real-like' && kind !== 'uncertain') return;
+          if (hit.keyLine !== undefined) namedKeyLines.add(hit.keyLine);
           add(hmac(`secret\0${hit.defId}\0${value.trim()}`), { kind: 'secret', defId: hit.defId, value: kind, file });
         };
         if (isEnvFileName(name)) findInEnv(text, file, isEnvExampleName(name), onValue);
         const place = textPlaceOf(name);
         if (place) findInText(text, file, place, onValue);
         if (place || isKeyFileCandidate(name)) {
-          let keyFp: string | undefined;
-          const key = findPrivateKey(text, (b) => (keyFp = hmac(`key\0${b}`)));
-          // ダミー以外は数える（本物か判断できない鍵は、安全とは扱わず 🟠 にする）
-          if (key && key.value !== 'test-like' && keyFp) add(keyFp, { kind: 'private-key', keyKind: key.kind, encrypted: key.encrypted, value: key.value, file });
+          // 同じファイルの鍵をすべて見る。ダミー以外は数える（本物か判断できない鍵は、安全とは扱わず 🟠 にする）
+          for (const key of findPrivateKeyCandidates(text)) {
+            if (key.value === 'test-like' || namedKeyLines.has(key.line)) continue;
+            add(hmac(`key\0${key.body}`), { kind: 'private-key', keyKind: key.kind, encrypted: key.encrypted, value: key.value, file });
+          }
         }
         if (Date.now() > deadline) {
           truncated = true;

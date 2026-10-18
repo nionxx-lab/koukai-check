@@ -7,7 +7,8 @@
 // ・本物か判断できないものは、安全とは扱わず uncertain（確認をおすすめ）にする
 // ・鍵・値は外へ出さない。返すのは種類・行番号・暗号化の有無だけ
 
-import { classifyKeyBody, pemBodyLines, type KeyBodyValue } from './key-structure.js';
+import { classifyKeyBody, type KeyBodyValue } from './key-structure.js';
+import { Constants, openQuoteIndex, readKeyExpression } from './string-expr.js';
 
 /** pem：PKCS#1/#8・EC などの PEM／openssh：OpenSSH 形式／pgp：PGP の秘密鍵／putty：PuTTY の鍵／service-account：Google・Firebase のサービスアカウント鍵 */
 export type PrivateKeyKind = 'pem' | 'openssh' | 'pgp' | 'putty' | 'service-account';
@@ -19,6 +20,8 @@ export interface PrivateKeyMatch {
   /** パスフレーズで暗号化されている */
   encrypted: boolean;
   line: number;
+  /** 鍵を組み立てる式に、復元できない部分（変数・呼び出し）がある */
+  unresolved?: boolean;
 }
 
 // OAuth クライアントの秘密（client_secret.json）の見本の値を見分けるための語（鍵の本体の判定には使わない）
@@ -30,10 +33,99 @@ function lineAt(text: string, index: number): number {
   return line;
 }
 
-/** 文字列の中の秘密鍵を探す（JSON の "\n" のような書き方も読む）。最初に見つかった1つだけを返す */
-/** onBody：本物の形の鍵の本体を受け取る関数（同じ鍵かどうかを、鍵を残さずに比べるため。鍵は結果には入れない） */
-export function findPrivateKey(text: string, onBody?: (body: string) => void): PrivateKeyMatch | undefined {
-  if (!/PRIVATE KEY|PuTTY-User-Key-File|service_account/.test(text)) return undefined;
+/** 1つのファイルから取り出した秘密鍵の候補（本体は結果に入れない。指紋づくり・名前つきの検出との突き合わせだけに使う） */
+export interface PrivateKeyCandidate extends PrivateKeyMatch {
+  /** 「-----BEGIN」の位置（ファイルの中の文字の位置） */
+  index: number;
+  /** 復元できた鍵の本体（外へ出さない） */
+  body: string;
+}
+
+const PEM_BEGIN = /-----BEGIN ((?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?)PRIVATE KEY-----/g;
+const MAX_KEYS_PER_FILE = 20;
+
+/**
+ * 復元できない部分（変数・呼び出し）がある鍵の判定。
+ * 構造が正しく本物と分かればそのまま。そうでなくても、引用符の中に鍵の本体らしい断片（base64・十分な長さ・ランダム）が
+ * 書かれていれば、本物の鍵の一部の可能性があるので、ダミーとは扱わず uncertain（確認をおすすめ）にする。
+ * 断片が見本の文字（base64 として読めない）なら、ダミーのまま。断片がない（見出しと変数だけ）なら、鍵をコードに書いた証拠がないので数えない。
+ */
+function judgePartial(value: KeyBodyValue, body: string): KeyBodyValue {
+  if (value !== 'test-like') return value;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(body) || body.length < 24) return value;
+  return new Set(body).size >= 12 ? 'uncertain' : value;
+}
+
+/** PEM の本体の行から、判定・暗号化の有無を決める */
+function judgePem(label: string, lines: string[], partial: boolean): { value: KeyBodyValue; encrypted: boolean; body: string } {
+  // 古い暗号化 PEM（Proc-Type: 4,ENCRYPTED）の見出し行は除く（カンマの有無は問わない）
+  const encrypted = label === 'ENCRYPTED ' || lines.some((l) => /^Proc-Type:4,?ENCRYPTED/i.test(l));
+  const body = lines.filter((l) => !l.includes(':')).join('');
+  // 古い形式の暗号化 PEM（Proc-Type）は、本体が暗号文なので ASN.1 の形にはならない
+  const judged = classifyKeyBody(encrypted && label !== 'ENCRYPTED ' && label !== 'OPENSSH ' ? 'legacy-encrypted' : label, body);
+  const value = partial ? judgePartial(judged.value, body) : judged.value;
+  return { value, encrypted: encrypted || judged.encrypted === true, body };
+}
+
+/** PEM の秘密鍵の候補をすべて取り出す（ふつうの PEM・コードの文字列の式・.env や JSON の "\n" の書き方） */
+function pemCandidates(text: string): PrivateKeyCandidate[] {
+  const out: PrivateKeyCandidate[] = [];
+  let consts: Constants | undefined;
+  let searchFrom = 0;
+  for (const m of text.matchAll(PEM_BEGIN)) {
+    const index = m.index ?? 0;
+    if (index < searchFrom) continue; // 前の鍵の中
+    const label = m[1] ?? '';
+    const endMark = `-----END ${label}PRIVATE KEY-----`;
+    const quote = openQuoteIndex(text, index);
+    let lines: string[] | undefined;
+    let partial = false;
+    let unresolved = false;
+    if (quote !== undefined) {
+      // コードの文字列リテラルの中：式を実行せずに読み、連結・同じファイルの定数を復元する
+      consts ??= new Constants(text);
+      const expr = readKeyExpression(text, quote, consts, new RegExp(endMark));
+      const begin = expr.value.indexOf(m[0]);
+      const end = expr.value.indexOf(endMark, begin + m[0].length);
+      unresolved = expr.unresolved.length > 0;
+      if (begin < 0) continue;
+      if (end < 0 && !unresolved) continue; // 終わりの印がなく、復元できない部分もない（鍵ではない文字列）
+      lines = expr.value.slice(begin + m[0].length, end < 0 ? undefined : end).split('\n').map((l) => l.replace(/\s/g, ''));
+      partial = unresolved || end < 0;
+      searchFrom = expr.end;
+    } else {
+      // ふつうの PEM（.env の 1行の値・JSON の "\n" も、改行として読む）。base64 の + には触れない
+      const end = text.indexOf(endMark, index + m[0].length);
+      if (end < 0) continue;
+      lines = text
+        .slice(index + m[0].length, end)
+        .replace(/\\r\\n|\\n/g, '\n')
+        .split('\n')
+        .map((l) => l.replace(/[\s\\]/g, ''));
+      searchFrom = end + endMark.length;
+    }
+    const judged = judgePem(label, lines, partial);
+    const candidate: PrivateKeyCandidate = {
+      kind: label === 'OPENSSH ' ? 'openssh' : 'pem',
+      value: judged.value,
+      encrypted: judged.encrypted,
+      line: lineAt(text, index),
+      index,
+      body: judged.body,
+    };
+    if (unresolved) candidate.unresolved = true;
+    out.push(candidate);
+    if (out.length >= MAX_KEYS_PER_FILE) break;
+  }
+  return out;
+}
+
+/**
+ * 文字列の中の秘密鍵の候補をすべて探す（同じファイルに複数あっても、それぞれを返す）。
+ * サービスアカウント鍵（JSON）・PEM・PGP・PuTTY。本体は外へ出さない（指紋・突き合わせ用に呼び出し側へ渡すだけ）
+ */
+export function findPrivateKeyCandidates(text: string): PrivateKeyCandidate[] {
+  if (!/PRIVATE KEY|PuTTY-User-Key-File|service_account/.test(text)) return [];
 
   // サービスアカウント鍵（JSON）：type が service_account で、private_key に秘密鍵が入っている
   if (/"type"\s*:\s*"service_account"/.test(text)) {
@@ -41,38 +133,19 @@ export function findPrivateKey(text: string, onBody?: (body: string) => void): P
       const json: unknown = JSON.parse(text);
       const o = json && typeof json === 'object' ? (json as Record<string, unknown>) : undefined;
       if (o?.type === 'service_account' && typeof o.private_key === 'string') {
-        const inner = findPrivateKey(o.private_key, onBody);
-        const at = text.indexOf('"private_key"');
-        if (inner) return { ...inner, kind: 'service-account', line: lineAt(text, Math.max(0, at)) };
+        const inner = findPrivateKeyCandidates(o.private_key)[0];
+        const at = Math.max(0, text.indexOf('"private_key"'));
+        if (inner) return [{ ...inner, kind: 'service-account', line: lineAt(text, at), index: at }];
       }
     } catch {
       // JSON として読めなければ、下の PEM の判定に任せる
     }
   }
 
-  const normalized = text.replace(/\\r\\n|\\n/g, '\n');
-  const pem = /-----BEGIN ((?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?)PRIVATE KEY-----([\s\S]*?)-----END \1PRIVATE KEY-----/.exec(normalized);
-  if (pem) {
-    const label = pem[1] ?? '';
-    // コードの文字列リテラルとして連結して書いた鍵も、引用符の内側だけをつないで本体を取り出す
-    const lines = pemBodyLines(normalized, pem.index, pem[2] ?? '');
-    // 古い暗号化 PEM（Proc-Type: 4,ENCRYPTED）の見出し行は除く
-    // Proc-Type の見出しは、カンマの有無を問わない
-    const encrypted = label === 'ENCRYPTED ' || lines.some((l) => /^Proc-Type:4,?ENCRYPTED/i.test(l));
-    const body = lines.filter((l) => !l.includes(':')).join('');
-    const kind: PrivateKeyKind = label === 'OPENSSH ' ? 'openssh' : 'pem';
-    // 古い形式の暗号化 PEM（Proc-Type）は、本体が暗号文なので ASN.1 の形にはならない
-    const judged = classifyKeyBody(encrypted && label !== 'ENCRYPTED ' && label !== 'OPENSSH ' ? 'legacy-encrypted' : label, body);
-    // 同じ鍵かどうかの比較（指紋）は、ダミー以外で行う（判断できない鍵も、履歴の確認の対象にする）
-    if (judged.value !== 'test-like') onBody?.(body);
-    return {
-      kind,
-      value: judged.value,
-      encrypted: encrypted || judged.encrypted === true,
-      line: lineAt(text, text.indexOf('-----BEGIN') >= 0 ? text.indexOf('-----BEGIN') : 0),
-    };
-  }
+  const out = pemCandidates(text);
+  if (out.length > 0) return out;
 
+  const normalized = text.replace(/\\r\\n|\\n/g, '\n');
   const pgp = /-----BEGIN PGP PRIVATE KEY BLOCK-----([\s\S]*?)-----END PGP PRIVATE KEY BLOCK-----/.exec(normalized);
   if (pgp) {
     const lines = (pgp[1] ?? '').split('\n').map((l) => l.trim()).filter((l) => l && !l.includes(':'));
@@ -80,8 +153,8 @@ export function findPrivateKey(text: string, onBody?: (body: string) => void): P
     const crcLine = lines.length > 1 && /^=[A-Za-z0-9+/]{4}$/.test(lines[lines.length - 1] ?? '') ? lines.pop() : undefined;
     const body = lines.join('');
     const judged = classifyKeyBody('pgp', body, crcLine?.slice(1));
-    if (judged.value !== 'test-like') onBody?.(body);
-    return { kind: 'pgp', value: judged.value, encrypted: false, line: lineAt(text, text.indexOf('-----BEGIN PGP')) };
+    const at = Math.max(0, text.indexOf('-----BEGIN PGP'));
+    return [{ kind: 'pgp', value: judged.value, encrypted: false, line: lineAt(text, at), index: at, body }];
   }
 
   // PuTTY の鍵（.ppk）：Private-Lines の後に秘密鍵の本体がある。Encryption が none 以外なら暗号化されている
@@ -90,10 +163,35 @@ export function findPrivateKey(text: string, onBody?: (body: string) => void): P
     const enc = /^Encryption:\s*(\S+)/m.exec(text)?.[1] ?? 'none';
     const priv = /^Private-Lines:\s*\d+\r?\n([\s\S]*?)(?:\r?\n[A-Za-z-]+:|$)/m.exec(text)?.[1]?.replace(/\s/g, '') ?? '';
     const judged = classifyKeyBody('putty', priv);
-    if (judged.value !== 'test-like') onBody?.(priv);
-    return { kind: 'putty', value: judged.value, encrypted: enc !== 'none', line: lineAt(text, putty.index) };
+    return [{ kind: 'putty', value: judged.value, encrypted: enc !== 'none', line: lineAt(text, putty.index), index: putty.index, body: priv }];
   }
-  return undefined;
+  return [];
+}
+
+/** 結果に入れる形（本体・位置を落とす） */
+function toMatch(c: PrivateKeyCandidate): PrivateKeyMatch {
+  const m: PrivateKeyMatch = { kind: c.kind, value: c.value, encrypted: c.encrypted, line: c.line };
+  if (c.unresolved) m.unresolved = true;
+  return m;
+}
+
+/**
+ * 文字列の中の秘密鍵をすべて探す。onBody：ダミー以外の鍵の本体を受け取る関数
+ * （同じ鍵かどうかを、鍵を残さずに比べるため。鍵は結果には入れない）
+ */
+export function findPrivateKeys(text: string, onBody?: (body: string) => void): PrivateKeyMatch[] {
+  return findPrivateKeyCandidates(text).map((c) => {
+    if (c.value !== 'test-like') onBody?.(c.body);
+    return toMatch(c);
+  });
+}
+
+/** 最初に見つかった秘密鍵（1つだけ見ればよい場面・これまでの呼び出しとの互換） */
+export function findPrivateKey(text: string, onBody?: (body: string) => void): PrivateKeyMatch | undefined {
+  const first = findPrivateKeyCandidates(text)[0];
+  if (!first) return undefined;
+  if (first.value !== 'test-like') onBody?.(first.body);
+  return toMatch(first);
 }
 
 /** 中身を確かめる鍵ファイルの候補（読むかどうかを決めるだけ。危険かどうかは中身で判定する） */

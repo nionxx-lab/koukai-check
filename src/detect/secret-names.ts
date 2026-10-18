@@ -7,7 +7,7 @@
 // 値を見るのは、直書きか参照か、本物らしいかを見分けるためだけで、判定が終わったら捨てる。
 
 import { PUBLIC_ENV_PREFIXES } from './env.js';
-import { classifyKeyBody, pemBodyLines } from './key-structure.js';
+import { findPrivateKeyCandidates, type PrivateKeyCandidate } from './key-files.js';
 import { SECRET_DEFINITIONS, type SecretDefinition, type ValueCheck } from './secret-defs.js';
 
 /** 見つけた場所の種類 */
@@ -67,6 +67,8 @@ export interface SecretNameHit {
   value?: SecretValue;
   /** 公開してよいキーの変数名（SUPABASE_ANON_KEY など）で見つけたか */
   publicName?: boolean;
+  /** 秘密鍵を値として読んだとき、その鍵の見出しの行（秘密鍵の項目と同じ鍵かを突き合わせるため） */
+  keyLine?: number;
   /** 同じファイルに、ローカルの Supabase の URL（localhost / 127.0.0.1）が書かれているか（ローカル開発用の判断の根拠の1つ） */
   localHint?: boolean;
 }
@@ -123,6 +125,13 @@ function decodeJwtPayload(v: string): Record<string, unknown> | undefined {
 const LOCAL_HOSTS = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|::1|\[::1\]|host\.docker\.internal|db|postgres|mysql|database|.*\.local)$/i;
 const PLACEHOLDER_PASSWORD = /^(\[.*\]|<.*>|\{.*\}|\$.*|\*+|x+|pass(word)?|secret|changeme|postgres|root|admin|your[-_].*|.*password.*|\.\.\.|…)$/i;
 
+/** 秘密鍵の候補の判定を、秘密情報の値の分類に直す */
+function keyValueOf(key: PrivateKeyCandidate): SecretValue {
+  if (key.value === 'real-like') return { kind: 'real-like', reason: 'private-key' };
+  if (key.value === 'uncertain') return { kind: 'uncertain', reason: 'key-unverified' };
+  return { kind: 'test-like', reason: key.body.length < 40 ? 'too-short' : 'not-token-format' };
+}
+
 /** 1つの確かめ方で分類する。当てはまらなければ undefined */
 function runCheck(check: ValueCheck, v: string): SecretValue | undefined {
   switch (check.type) {
@@ -172,19 +181,9 @@ function runCheck(check: ValueCheck, v: string): SecretValue | undefined {
       return { kind: 'real-like', reason: 'url-credentials' };
     }
     case 'pem-private-key': {
-      const text = v.replace(/\\n/g, '\n');
-      const m = /-----BEGIN ([A-Z ]*)PRIVATE KEY-----([\s\S]*?)-----END/.exec(text);
-      if (!m) return undefined;
-      // 鍵の本体は、語ではなく構造で判定する（本物の鍵にも test などの並びが偶然含まれるため）。見出し行（Proc-Type など）は除く
-      // コードの文字列リテラルとして連結して書いた鍵も、引用符の内側だけをつないで本体を取り出す
-      const lines = pemBodyLines(text, m.index, m[2] ?? '');
-      // Proc-Type の見出しは、カンマの有無を問わない
-      const legacyEncrypted = lines.some((l) => /^Proc-Type:4,?ENCRYPTED/i.test(l)) && !/ENCRYPTED|OPENSSH/.test(m[1] ?? '');
-      const body = lines.filter((l) => !l.includes(':')).join('');
-      const judged = classifyKeyBody(legacyEncrypted ? 'legacy-encrypted' : (m[1] ?? ''), body);
-      if (judged.value === 'real-like') return { kind: 'real-like', reason: 'private-key' };
-      if (judged.value === 'uncertain') return { kind: 'uncertain', reason: 'key-unverified' };
-      return { kind: 'test-like', reason: body.length < 40 ? 'too-short' : 'not-token-format' };
+      // 秘密鍵の取り出しと判定は、名前のない秘密鍵の検出（key-files.ts）と同じものを使う（式の連結・定数・"\n" の書き方も同じに読む）
+      const key = findPrivateKeyCandidates(v).find((c) => c.kind === 'pem' || c.kind === 'openssh');
+      return key ? keyValueOf(key) : undefined;
     }
   }
 }
@@ -398,7 +397,10 @@ export function findInText(text: string, file: string, place: 'config' | 'source
 function findInTextInner(text: string, file: string, place: 'config' | 'source' | 'other', values: Map<SecretNameHit, string>): SecretNameHit[] {
   const hits: SecretNameHit[] = [];
   const localHint = hasLocalSupabaseUrl(text);
+  // 秘密鍵の候補はファイル全体から1回だけ取り出す（式の連結・同じファイルの定数を、名前のない検出と同じように読む）
+  let keys: PrivateKeyCandidate[] | undefined;
   for (const def of SECRET_DEFINITIONS) {
+    const isKey = def.checks.some((c) => c.type === 'pem-private-key');
     for (const { name: n, publicName } of namesOf(def)) {
       if (!text.includes(n)) continue;
       const re = new RegExp(`([A-Za-z0-9_]*)${n}(?![A-Za-z0-9_])`, 'g');
@@ -406,11 +408,17 @@ function findInTextInner(text: string, file: string, place: 'config' | 'source' 
         const prefix = m[1] ?? '';
         if (prefix !== '' && !isPublicPrefix(prefix)) continue; // 別の変数名（MY_GITHUB_TOKEN など）
         const index = m.index ?? 0;
-        const after = text.slice(index + m[0].length, index + m[0].length + (def.checks.some((c) => c.type === 'pem-private-key') ? 8000 : 400));
-        const found = valueAfterName(after, def);
+        const afterStart = index + m[0].length;
+        const after = text.slice(afterStart, afterStart + (isKey ? 8000 : 400));
+        // 秘密鍵：名前の直後（= や : のあと）から始まる鍵の候補を使う。名前の後ろの最初の文字列だけを値にしない
+        const key = isKey
+          ? (keys ??= findPrivateKeyCandidates(text)).find((c) => c.index >= afterStart && /^["'`]?\]?\s*[:=]\s*[\s("'`|>]*$/.test(text.slice(afterStart, c.index)))
+          : undefined;
+        const found = key ? { usage: 'literal' as const, value: key.body } : valueAfterName(after, def);
         const hit: SecretNameHit = { defId: def.id, as: prefix + n, file, line: lineOf(text, index), place, usage: found.usage, localHint };
+        if (key) hit.keyLine = key.line;
         if (found.value !== undefined) {
-          hit.value = classifySecretValue(def, found.value);
+          hit.value = key ? keyValueOf(key) : classifySecretValue(def, found.value);
           values.set(hit, found.value);
           if (prefix !== '' || (publicName && hit.value.kind !== 'public')) hit.usage = 'public-env';
         }

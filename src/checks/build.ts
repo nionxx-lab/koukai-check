@@ -139,9 +139,34 @@ export function privateKeyRisk(k: PrivateKeyLocation): SecretRisk {
   return risk;
 }
 
-/** 鍵の状態の補足（暗号化・本物か判断できない） */
+/** 鍵の状態の補足（暗号化・本物か判断できない・復元できない部分がある） */
 function keyStateText(k: PrivateKeyLocation): string {
-  return (k.encrypted ? '・パスフレーズで暗号化されている' : '') + (k.value === 'uncertain' ? '・秘密鍵の形だが、本物か確認できない' : '');
+  return (
+    (k.encrypted ? '・パスフレーズで暗号化されている' : '') +
+    (k.value === 'uncertain' ? '・秘密鍵の形だが、本物か確認できない' : '') +
+    (k.unresolved ? '・コードの一部（変数など）を復元できない' : '')
+  );
+}
+
+const RISK_RANK: Record<SecretRisk, number> = { danger: 2, warn: 1, info: 0 };
+
+/**
+ * 名前つきの秘密情報（GitHub App の秘密鍵など）と、秘密鍵の項目が同じ鍵（同じファイルの同じ見出しの行）を指しているときだけ、重ねて出さない。
+ * 重いほうを残す（同じなら名前つき。ただし復元できない部分がある鍵は、その補足を出せる秘密鍵の項目を残す）。
+ * ファイル名・変数名があるだけでは、秘密鍵の項目を消さない。
+ */
+function keyDuplicates(scan: ScanResult): { keys: Set<PrivateKeyLocation>; named: Set<SecretNameLocation> } {
+  const keys = new Set<PrivateKeyLocation>();
+  const named = new Set<SecretNameLocation>();
+  for (const h of scan.secretNames) {
+    if (h.keyLine === undefined || !h.value) continue;
+    const k = scan.privateKeys.find((p) => !p.publicDir && p.file === h.file && p.line === h.keyLine);
+    if (!k || keys.has(k)) continue;
+    const diff = RISK_RANK[secretRisk(h)] - RISK_RANK[privateKeyRisk(k)];
+    if (diff > 0 || (diff === 0 && !k.unresolved)) keys.add(k);
+    else named.add(h);
+  }
+  return { keys, named };
 }
 
 function keyLocationText(k: PrivateKeyLocation): string {
@@ -150,9 +175,9 @@ function keyLocationText(k: PrivateKeyLocation): string {
 
 function privateKeyChecks(scan: ScanResult): CheckItem[] {
   const items: CheckItem[] = [];
-  // GitHub App の秘密鍵など、秘密情報の定義（名前つき）で見つけた場所は重ねて出さない
-  const named = new Set(scan.secretNames.filter((h) => h.value?.reason === 'private-key' || h.value?.reason === 'key-unverified' || h.defId === 'github-app-private-key').map((h) => h.file));
-  const keys = scan.privateKeys.filter((k) => !k.publicDir && !named.has(k.file));
+  // 名前つきの秘密情報で、同じ鍵を同じ重さ以上で出している場所だけは重ねて出さない
+  const duplicates = keyDuplicates(scan).keys;
+  const keys = scan.privateKeys.filter((k) => !k.publicDir && !duplicates.has(k));
   const danger = keys.filter((k) => privateKeyRisk(k) === 'danger');
   const warn = keys.filter((k) => privateKeyRisk(k) === 'warn');
   const ignored = keys.filter((k) => k.value !== 'test-like' && privateKeyRisk(k) === 'info');
@@ -461,8 +486,9 @@ function firebaseRulesChecks(scan: ScanResult): CheckItem[] {
 function secretChecks(scan: ScanResult): CheckItem[] {
   const items: CheckItem[] = [];
   const details: NonNullable<CheckItem['details']> = [];
+  const duplicates = keyDuplicates(scan).named;
   for (const def of SECRET_DEFINITIONS) {
-    const hits = scan.secretNames.filter((h) => h.defId === def.id);
+    const hits = scan.secretNames.filter((h) => h.defId === def.id && !duplicates.has(h));
     if (hits.length === 0) continue;
     const danger = hits.filter((h) => secretRisk(h) === 'danger');
     const warn = hits.filter((h) => secretRisk(h) === 'warn');

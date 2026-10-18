@@ -12,7 +12,7 @@ import { closeSync, existsSync, lstatSync, openSync, readdirSync, readFileSync, 
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { isEnvExampleName, isEnvFileName, parseEnv, type SecretValueKind } from './env.js';
 import { analyzeDatabaseRules, analyzeServiceRules, DEFAULT_RULES_FILES, firebaseJsonPaths, type RuleFinding, type RulesKind } from './firebase-rules.js';
-import { dbBackupKind, envHasValues, findPrivateKey, isKeyFileCandidate, isOAuthClientSecretJson, PUBLIC_DIR_NAMES, type PrivateKeyKind } from './key-files.js';
+import { dbBackupKind, envHasValues, findPrivateKeys, isKeyFileCandidate, isOAuthClientSecretJson, PUBLIC_DIR_NAMES, type PrivateKeyKind } from './key-files.js';
 import { isIgnored, parseGitignore, type GitignoreRules } from './gitignore.js';
 import { readGitIndex } from './git-index.js';
 import { keyFingerprint, newFingerprintKey, scanGitHistory, secretFingerprint, type GitHistoryResult, type HistoryLimits } from './git-history.js';
@@ -91,6 +91,8 @@ export interface PrivateKeyLocation {
   value: 'real-like' | 'test-like' | 'uncertain';
   /** パスフレーズで暗号化されている */
   encrypted: boolean;
+  /** 鍵を組み立てる式に、復元できない部分（変数・呼び出し）がある */
+  unresolved?: boolean;
   git: GitState;
   publicDir?: string;
 }
@@ -376,8 +378,8 @@ export function scanProject(inputPath: string, limits: ScanLimits = DEFAULT_LIMI
       searchedBytes += text.length;
       if (place) secretHits.push(...findInText(text, rel, place, remember));
       // 秘密鍵・サービスアカウント鍵（中身で判定する。ファイル名・拡張子では判定しない）
-      const key = findPrivateKey(text, (body) => currentFingerprints.add(keyFingerprint(fingerprintKey, body)));
-      if (key) keyHits.push({ file: rel, ...key });
+      // 同じファイルに複数の鍵があれば、それぞれを結果にする
+      for (const key of findPrivateKeys(text, (body) => currentFingerprints.add(keyFingerprint(fingerprintKey, body)))) keyHits.push({ file: rel, ...key });
       if (pub && name.toLowerCase().endsWith('.json') && isOAuthClientSecretJson(text)) exposures.push({ file: rel, kind: 'credential-json', publicDir: pub });
     }
   };
